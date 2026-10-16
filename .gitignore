@@ -1,0 +1,23 @@
+# Sensitive environment variables (API keys)
+.env
+
+# User browser session & cookies (never share this!)
+.browser-profile/
+
+# Personal progress tracking
+progress.json
+progress.tmp
+
+# Execution artifacts, screenshots & logs
+runs/
+*.png
+*.jpg
+*.jpeg
+
+# Python cache & virtual environment
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/

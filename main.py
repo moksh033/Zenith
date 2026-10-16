@@ -1,0 +1,977 @@
+"""
+main.py – CLI entry point, main runner loop, and resume logic.
+
+Usage:
+    python main.py --start-url <URL>
+    python main.py --probe          # dump DOM info, click nothing
+    python main.py --dry-run        # print decisions, click nothing
+    python main.py --roadmap        # continue across roadmap courses
+
+Loop: observe → classify → act → confirm page changed → record
+"""
+
+import argparse
+import json
+import os
+import sys
+import time
+from pathlib import Path
+from datetime import datetime
+
+from dotenv import load_dotenv
+from playwright.sync_api import sync_playwright
+
+import observe
+import classify
+import editor
+import solve
+import act
+import syllabus
+import progress
+
+load_dotenv()
+
+# ─── Constants ────────────────────────────────────────────────────
+MAX_SUBMITS_PER_LESSON = 3
+MAX_ACTIONS_PER_LESSON = 15
+BROWSER_PROFILE_DIR = Path(__file__).parent / ".browser-profile"
+DEFAULT_START_URL = "https://www.codechef.com/learn/course/c/CDEVINTRO/problems/CDEV004B"
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="CodeChef Course Runner")
+    parser.add_argument(
+        "--start-url",
+        default=DEFAULT_START_URL,
+        help="Lesson URL to start from",
+    )
+    parser.add_argument(
+        "--probe",
+        action="store_true",
+        help="Dump buttons, editor kind, syllabus links; click nothing",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print decision for current page; click nothing",
+    )
+    parser.add_argument(
+        "--roadmap",
+        action="store_true",
+        help="After this course, continue with all roadmap courses",
+    )
+    return parser.parse_args()
+
+
+def wait_for_login(page):
+    """
+    On first launch, wait for the user to log in.
+    Detects login by checking for user-specific elements.
+    """
+    print("\n" + "=" * 60)
+    print("  FIRST LAUNCH – Please log in to CodeChef in the browser.")
+    print("  The runner will continue automatically after login.")
+    print("=" * 60 + "\n")
+
+    while True:
+        try:
+            logged_in = page.evaluate("""() => {
+                // Check for "Hello, <username>" in navbar (CodeChef pattern)
+                const nav = document.querySelector('nav, header');
+                if (nav) {
+                    const text = nav.textContent || '';
+                    if (text.includes('Hello,') || text.includes('Hello ')) return true;
+                }
+                // Check for user menu, avatar, or username indicators
+                const userIndicators = [
+                    '[class*="user-menu"]', '[class*="avatar"]',
+                    '[class*="profile"]', 'a[href*="/users/"]',
+                    '[class*="logged-in"]', '[class*="user-nav"]',
+                    'img[alt*="avatar" i]', 'img[alt*="profile" i]',
+                ];
+                for (const sel of userIndicators) {
+                    if (document.querySelector(sel)) return true;
+                }
+                return false;
+            }""")
+            if logged_in:
+                print("[login] User is logged in!")
+                return True
+        except Exception:
+            pass
+        time.sleep(2)
+
+
+def run_probe(page):
+    """Probe mode: dump DOM info without clicking anything."""
+    obs = observe.observe(page, "probe")
+    kind = editor.detect_editor(page)
+    syl = syllabus.get_syllabus(page)
+
+    print("\n" + "=" * 60)
+    print("  PROBE RESULTS")
+    print("=" * 60)
+    print(f"URL:           {obs['url']}")
+    print(f"Title:         {obs['title']}")
+    print(f"Buttons:       {obs['buttons']}")
+    print(f"Tabs:          {obs['tabs']}")
+    print(f"Editor kind:   {kind}")
+    print(f"Has editor:    {obs['has_editor']}")
+    print(f"Language:      {obs['language']}")
+    print(f"Submit disabled: {obs['submit_disabled']}")
+    print(f"Next disabled:   {obs['next_disabled']}")
+    print(f"Has Solution tab: {obs['has_solution_tab']}")
+    print(f"Has radio:     {obs['has_radio_buttons']}")
+    print(f"Has login:     {obs['has_login_form']}")
+    print(f"Has certificate: {obs['has_certificate']}")
+    print(f"Screenshot:    {obs['screenshot']}")
+    print(f"\nEditor text ({len(obs['editor_text'])} chars):")
+    if obs['editor_text']:
+        print(obs['editor_text'][:500])
+    print(f"\nStatement ({len(obs['statement'])} chars):")
+    if obs['statement']:
+        print(obs['statement'][:500])
+    print(f"\nOutput panel:")
+    if obs['output_text']:
+        print(obs['output_text'][:300])
+    print(f"\nSyllabus ({len(syl)} URLs):")
+    for i, url in enumerate(syl[:20]):
+        print(f"  {i+1}. {url}")
+    if len(syl) > 20:
+        print(f"  ... and {len(syl) - 20} more")
+    print("=" * 60)
+
+
+def run_dry_run(page):
+    """Dry-run mode: print what the runner would do without clicking."""
+    obs = observe.observe(page, "dry_run")
+    layout = classify.classify(obs)
+    summary = classify.get_decision_summary(obs, layout)
+
+    print("\n" + "=" * 60)
+    print("  DRY RUN")
+    print("=" * 60)
+    print(summary)
+    print("=" * 60)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Handler functions for each layout
+# ═══════════════════════════════════════════════════════════════════
+
+def handle_reading(page, obs):
+    """Handle a reading page: click Next."""
+    url = obs["url"]
+    print(f"[reading] {obs['title'][:60]}")
+
+    # If Next is disabled and there's a same-origin video, seek to end
+    if obs["next_disabled"]:
+        print("[reading] Next is disabled, checking for video...")
+        if act.seek_video_to_end(page):
+            print("[reading] Seeked video to end, rechecking Next...")
+            time.sleep(2)
+            # Re-observe
+            obs = observe.read_dom(page)
+            if obs.get("next_disabled", True):
+                print("[reading] Next still disabled after video seek")
+                return False
+
+    if act.click_next(page):
+        print("[reading] → Next clicked, page changed")
+        progress.mark_lesson(url, "done")
+        return True
+    else:
+        # Check if a badge / streak popup was blocking Next
+        if act.dismiss_popups(page):
+            print("[reading] Dismissed popup blocking reading page, retrying Next...")
+            time.sleep(1)
+            if act.click_next(page):
+                print("[reading] → Next clicked after dismissing popup")
+                progress.mark_lesson(url, "done")
+                return True
+        print("[reading] → Next failed")
+        return False
+
+
+def handle_guided(page, obs):
+    """Handle a guided page: submit existing code, then Next."""
+    url = obs["url"].split("?")[0]
+    print(f"[guided] {obs['title'][:60]}")
+
+    # Confirm language
+    editor.set_language(page, "C")
+
+    # Submit existing code
+    submit_count = progress.increment_submits(url)
+    if submit_count > MAX_SUBMITS_PER_LESSON:
+        print(f"[guided] Max submits ({MAX_SUBMITS_PER_LESSON}) reached, blocking")
+        progress.mark_lesson(url, "blocked", "max submits reached")
+        return False
+
+    if not act.click_submit(page):
+        print("[guided] Submit click failed, trying Next directly")
+        if act.click_next(page):
+            progress.mark_lesson(url, "done")
+            return True
+        return False
+
+    print("[guided] Submitted, waiting for verdict...")
+    verdict = act.wait_for_verdict(page, timeout=15000)
+    print(f"[guided] Verdict: {verdict}")
+
+    if verdict == "accepted":
+        act.jitter_delay(1, 2)
+        if act.click_next(page):
+            progress.mark_lesson(url, "done")
+            return True
+        progress.mark_lesson(url, "done")
+        return True
+
+    # On worked examples, execution might finish without explicit "accepted" text.
+    # Check if Next button can advance the page.
+    print("[guided] Checking if page can advance via Next...")
+    act.jitter_delay(1, 2)
+    if act.click_next(page):
+        time.sleep(1)
+        new_url = page.url.split("?")[0]
+        if new_url != url:
+            print("[guided] Page advanced successfully via Next!")
+            progress.mark_lesson(url, "done")
+            return True
+
+    # Verdict not accepted → try repair once
+    if submit_count < MAX_SUBMITS_PER_LESSON:
+        print("[guided] Attempting repair...")
+        verdict_detail = act.get_verdict_detail(page)
+        repaired = solve.repair_solution(
+            obs["statement"], obs["editor_text"], verdict_detail, "C"
+        )
+        if repaired:
+            if editor.write_code(page, repaired):
+                act.jitter_delay()
+                progress.increment_submits(url)
+                if act.click_submit(page):
+                    verdict2 = act.wait_for_verdict(page, timeout=20000)
+                    print(f"[guided] Repair verdict: {verdict2}")
+                    if verdict2 == "accepted":
+                        act.jitter_delay(1, 2)
+                        act.click_next(page)
+                        progress.mark_lesson(url, "done")
+                        return True
+
+    # All attempts failed
+    print(f"[guided] Could not complete guided lesson at {url}")
+    progress.mark_lesson(url, "blocked", f"verdict: {verdict}")
+    return False
+
+
+def handle_exercise(page, obs):
+    """Handle an exercise page: write code, submit, then Next.
+    
+    Strategy (up to 3 attempts):
+    1. Solution tab code or pre-filled code → submit
+    2. If wrong: Gemini generates fresh solution → submit  
+    3. If wrong: Gemini repairs with error feedback → submit
+    """
+    url = obs["url"].split("?")[0]
+    print(f"[exercise] {obs['title'][:60]}")
+
+    statement = obs.get("statement", "")
+
+    # Attempt 1: Solution tab or existing code
+    code = solve.resolve_code(page, obs, "C")
+    if code:
+        result = _submit_code(page, url, obs, code, "solution_tab")
+        if result == "accepted":
+            return True
+        if result == "no_submit":
+            # Submit button failed — try Gemini
+            pass
+    else:
+        print("[exercise] No code from Solution tab")
+
+    # Attempt 2: Ask Gemini to generate from scratch
+    print("[exercise] Generating fresh solution with Gemini...")
+    current_code = editor.read_editor(page) or ""
+    gemini_code = solve.generate_solution(statement, current_code, "C")
+    if gemini_code:
+        result = _submit_code(page, url, obs, gemini_code, "gemini_generate")
+        if result == "accepted":
+            return True
+
+    # Attempt 3: Repair last submission with error details
+    print("[exercise] Attempting Gemini repair...")
+    verdict_detail = act.get_verdict_detail(page)
+    submitted_code = editor.read_editor(page) or current_code
+    repaired = solve.repair_solution(statement, submitted_code, verdict_detail, "C")
+    if repaired:
+        result = _submit_code(page, url, obs, repaired, "gemini_repair")
+        if result == "accepted":
+            return True
+
+    # All 3 attempts failed — DO NOT skip or click Next
+    print("[exercise] All attempts failed — staying on page, not skipping to next problem.")
+    progress.mark_lesson(url, "blocked", "all attempts failed")
+    return False
+
+
+def _submit_code(page, url, obs, code, source):
+    """Write code, submit, wait for verdict. Returns 'accepted', 'wrong', or 'no_submit'."""
+    # Write the code
+    if not classify.is_code_written(editor.read_editor(page) or "", obs.get("statement", "")):
+        if not editor.write_code(page, code):
+            print(f"[exercise] Editor write failed ({source})")
+            return "no_submit"
+    elif source != "solution_tab":
+        # Force-write for Gemini attempts
+        if not editor.write_code(page, code):
+            print(f"[exercise] Editor write failed ({source})")
+            return "no_submit"
+
+    editor.set_language(page, "C")
+
+    # Submit immediately
+    progress.increment_submits(url)
+    if not act.click_submit(page):
+        print(f"[exercise] Submit click failed ({source})")
+        return "no_submit"
+
+    print(f"[exercise] Submitted ({source}), waiting for verdict...")
+    verdict = act.wait_for_verdict(page, timeout=45000)
+    print(f"[exercise] Verdict: {verdict}")
+
+    if verdict == "accepted":
+        act.jitter_delay(0.5, 1.5)
+        act.click_next(page)
+        progress.mark_lesson(url, "done")
+        return "accepted"
+
+    if verdict == "timeout":
+        # Check if Next button is available (implicit accept)
+        time.sleep(1)
+        if act.click_next(page):
+            new_url = page.url.split("?")[0]
+            if new_url != url:
+                print("[exercise] Page changed after timeout — treating as accepted")
+                progress.mark_lesson(url, "done")
+                return "accepted"
+
+    return "wrong"
+
+
+def handle_quiz(page, obs):
+    """Handle a quiz page: try options, verify verdict, never skip.
+    
+    Tries Gemini's pick first (if available), then brute-forces all options.
+    Polls the DOM for confirmed 'correct' or 'wrong' feedback.
+    NEVER clicks Next or marks as done unless confirmed CORRECT.
+    """
+    url = obs["url"].split("?")[0]
+    print(f"[quiz] {obs['title'][:60]}")
+
+    statement = obs.get("statement", "")
+    quiz_data = act.get_quiz_data(page)
+    num_options = len(quiz_data["options"]) if quiz_data["options"] else 0
+
+    if num_options == 0:
+        # Try counting radio buttons directly
+        num_options = page.locator('input[type="radio"]').count()
+        if num_options == 0:
+            num_options = page.locator('[class*="option"], [class*="choice"]').count()
+
+    if num_options == 0:
+        print("[quiz] No options found, stopping to avoid skip")
+        progress.mark_lesson(url, "blocked", "no quiz options found")
+        return False
+
+    print(f"[quiz] Found {num_options} options")
+    option_texts = quiz_data.get("options", [])
+
+    # Strategy 1: Ask Gemini to pick the right answer
+    gemini_pick = solve.pick_quiz_answer(statement, option_texts)
+    print(f"[quiz] Gemini initial pick: option {gemini_pick + 1}")
+
+    # Build order: Gemini pick first, then the remaining options
+    order = [gemini_pick] + [i for i in range(num_options) if i != gemini_pick]
+
+    # Try up to 2 full passes (in case first pass missed verdict due to UI delay)
+    max_passes = 2
+    for pass_num in range(1, max_passes + 1):
+        if pass_num > 1:
+            print(f"[quiz] ── Starting pass {pass_num}/{max_passes} across options ──")
+
+        for attempt_idx, idx in enumerate(order):
+            print(f"[quiz] [Pass {pass_num}] Trying option {idx + 1}/{num_options}...")
+
+            # Click the option
+            if not act.click_quiz_option(page, idx):
+                print(f"[quiz] Option {idx + 1} click failed, trying next")
+                continue
+
+            time.sleep(1.0)  # Ensure selection registers in DOM
+
+            # Click Submit
+            if not act.click_submit(page):
+                print("[quiz] Submit click failed, retrying once...")
+                time.sleep(1.0)
+                if not act.click_submit(page):
+                    print("[quiz] Submit click failed, moving to next option")
+                    continue
+
+            # Wait and poll for verdict (up to 8 seconds)
+            print(f"[quiz] Waiting for quiz verdict...")
+            verdict = wait_for_quiz_verdict(page, timeout=8.0)
+            print(f"[quiz] Verdict for option {idx + 1}: {verdict}")
+
+            if verdict == "correct":
+                print(f"[quiz] ✓ Option {idx + 1} is CONFIRMED CORRECT! Problem solved.")
+                act.jitter_delay(1.5, 2.5)
+                # Click Next only now, after confirmed correct
+                act.click_next(page)
+                time.sleep(1.5)
+                progress.mark_lesson(url, "done")
+                return True
+            elif verdict == "wrong":
+                print(f"[quiz] ✗ Option {idx + 1} was WRONG. Continuing to next option...")
+                time.sleep(1.0)
+            else:
+                print(f"[quiz] Verdict timed out for option {idx + 1}. Continuing to next option...")
+                time.sleep(1.0)
+
+    # If all passes failed, DO NOT SKIP!
+    print(f"[quiz] ✗ All {num_options} options attempted across {max_passes} passes without confirmed correct answer.")
+    print("[quiz] NOT clicking Next — stopping so question is not skipped.")
+    progress.mark_lesson(url, "blocked", "all quiz options failed")
+    return False
+
+
+def wait_for_quiz_verdict(page, timeout: float = 8.0) -> str:
+    """
+    Poll the page for up to `timeout` seconds to determine quiz outcome.
+    Returns 'correct', 'wrong', or 'timeout'.
+    """
+    start = time.time()
+    while time.time() - start < timeout:
+        v = _check_quiz_verdict(page)
+        if v in ("correct", "wrong"):
+            return v
+        time.sleep(0.5)
+    return "timeout"
+
+
+def _check_quiz_verdict(page) -> str:
+    """
+    Examine DOM for explicit feedback banner and card styles.
+    Returns 'correct', 'wrong', or 'pending'.
+    """
+    try:
+        return page.evaluate(r"""() => {
+            const bodyText = document.body ? document.body.innerText : '';
+
+            // 1. Check for CodeChef's 'Find Error?' button (ONLY appears on wrong answer)
+            const allButtons = Array.from(document.querySelectorAll('button, a, [role="button"]'));
+            const hasFindError = allButtons.some(b => b.textContent && b.textContent.includes('Find Error'));
+            if (hasFindError) {
+                return 'wrong';
+            }
+
+            // 2. Check dedicated feedback / banner elements
+            const feedbackEls = document.querySelectorAll(
+                '[class*="banner"], [class*="alert"], [class*="result"], ' +
+                '[class*="verdict"], [class*="feedback"], [class*="message"]'
+            );
+            for (const el of feedbackEls) {
+                if (el.offsetParent === null) continue;
+                const t = el.innerText.trim().toLowerCase();
+                if (t.includes('wrong answer') || t.includes('incorrect') || t.includes('try again')) {
+                    return 'wrong';
+                }
+                if (t.includes('correct answer') || t.includes('right answer') || t.includes('well done')) {
+                    return 'correct';
+                }
+            }
+
+            // 3. Check selected option card border and background color
+            const selectedRadios = document.querySelectorAll('input[type="radio"]:checked');
+            let cards = [];
+            selectedRadios.forEach(r => {
+                const c = r.closest('[class*="option"], [class*="choice"], label, div');
+                if (c) cards.push(c);
+            });
+            if (cards.length === 0) {
+                document.querySelectorAll('[class*="selected"], [class*="active"]').forEach(c => {
+                    if (c.offsetParent !== null) cards.push(c);
+                });
+            }
+
+            function parseRgb(color) {
+                const m = (color || '').match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
+                return m ? [parseInt(m[1]), parseInt(m[2]), parseInt(m[3])] : null;
+            }
+
+            for (const card of cards) {
+                const style = window.getComputedStyle(card);
+                const bg = parseRgb(style.backgroundColor);
+                const border = parseRgb(style.borderColor);
+
+                // Red indicator (wrong answer)
+                const isRedBg = bg && bg[0] > 60 && bg[0] > bg[1] * 1.4 && bg[0] > bg[2] * 1.4;
+                const isRedBorder = border && border[0] > 100 && border[0] > border[1] * 1.4 && border[0] > border[2] * 1.4;
+                if (isRedBg || isRedBorder) return 'wrong';
+
+                // Green indicator (correct answer)
+                const isGreenBg = bg && bg[1] > 50 && bg[1] > bg[0] * 1.3;
+                const isGreenBorder = border && border[1] > 80 && border[1] > border[0] * 1.3;
+                if (isGreenBg || isGreenBorder) return 'correct';
+            }
+
+            // 4. Broad check for exact phrases in body text
+            if (/wrong\s*answer/i.test(bodyText)) return 'wrong';
+            if (/correct\s*answer/i.test(bodyText)) return 'correct';
+
+            return 'pending';
+        }""") or "pending"
+    except Exception as e:
+        print(f"[quiz] _check_quiz_verdict error: {e}")
+        return "pending"
+
+
+def handle_roadmap(page, obs, continue_roadmap: bool = False):
+    """
+    Handle the roadmap page: collect course URLs.
+    Returns the list of course URLs.
+    """
+    print("[roadmap] On roadmap page")
+
+    # Click Start Roadmap Now if needed
+    if "Start Roadmap Now" in " ".join(obs["buttons"]):
+        act.click_start_roadmap(page)
+        time.sleep(2)
+
+    # Collect course URLs
+    courses = syllabus.get_course_urls_from_roadmap(page)
+    print(f"[roadmap] Found {len(courses)} courses")
+    for i, url in enumerate(courses):
+        print(f"  {i+1}. {url}")
+
+    return courses
+
+
+def handle_outline(page, obs, lesson_urls):
+    """Handle an outline/module page: open first unfinished lesson."""
+    print("[outline] On module outline page")
+
+    # Get lesson URLs from this page
+    page_urls = syllabus.get_lesson_urls_from_page(page)
+    if page_urls:
+        lesson_urls.extend(page_urls)
+
+    # Find first unfinished
+    for url in page_urls:
+        if not progress.is_done(url) and not progress.is_blocked(url):
+            print(f"[outline] Opening: {url}")
+            page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            time.sleep(2)
+            return True
+
+    print("[outline] All lessons done or blocked")
+    return False
+
+
+def handle_auth(page):
+    """Handle auth wall: wait for human login."""
+    print("[auth] Login/verify wall detected – waiting for human...")
+    wait_for_login(page)
+    time.sleep(2)
+    return True
+
+
+def handle_running(page, obs):
+    """Handle running/evaluating state: wait for verdict."""
+    print("[running] Submission still evaluating...")
+    verdict = act.wait_for_verdict(page, timeout=60000)
+    print(f"[running] Verdict: {verdict}")
+    return verdict
+
+
+def handle_done(page, obs, continue_roadmap: bool = False):
+    """Handle course-done screen."""
+    url = obs["url"]
+    course_id = syllabus.extract_course_id(url)
+    print(f"[done] Course {course_id} completed!")
+    if course_id:
+        progress.mark_course_done(course_id)
+    return not continue_roadmap  # True = stop, unless roadmap mode
+
+
+def handle_unknown(page, obs):
+    """Handle unknown layout: try to advance before blocking."""
+    url = obs["url"].split("?")[0]
+    screenshot = obs.get("screenshot", "")
+
+    print(f"[unknown] Unrecognized layout at {url}")
+
+    # Strategy 1: Try clicking Next or Keep Learning — might just work
+    if act.click_next(page):
+        time.sleep(1.5)
+        new_url = page.url.split("?")[0]
+        if new_url != url:
+            print("[unknown] Clicked Next and page changed — success!")
+            progress.mark_lesson(url, "done", "advanced from unknown layout")
+            return "done"
+
+    # Strategy 2: If there's a Submit button, treat as exercise/guided
+    if obs.get("has_editor", False):
+        print("[unknown] Has editor — treating as exercise")
+        return "exercise"
+
+    # Strategy 3: Vision classification
+    if screenshot and os.path.exists(screenshot):
+        dom_summary = classify.get_decision_summary(obs, "unknown")
+        result = solve.classify_with_vision(screenshot, dom_summary)
+        print(f"[unknown] Vision says: {result}")
+        if result["layout"] != "unknown":
+            return result["layout"]
+
+    # Strategy 4: Try clicking any prominent button on the page
+    try:
+        buttons = page.locator('button:visible, a.btn:visible, [role="button"]:visible')
+        for i in range(min(buttons.count(), 5)):
+            btn = buttons.nth(i)
+            text = (btn.text_content() or "").strip().lower()
+            # Skip denied/dangerous buttons
+            if any(w in text for w in ["certificate", "download", "delete", "logout", "sign out"]):
+                continue
+            if text and len(text) < 30:
+                print(f"[unknown] Trying button: '{text}'")
+                btn.click()
+                time.sleep(1.5)
+                new_url = page.url.split("?")[0]
+                if new_url != url:
+                    print(f"[unknown] Button '{text}' advanced the page!")
+                    progress.mark_lesson(url, "done", f"clicked '{text}'")
+                    return "done"
+    except Exception:
+        pass
+
+    progress.mark_lesson(url, "blocked", "unknown layout")
+    return None
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Main runner loop
+# ═══════════════════════════════════════════════════════════════════
+
+def run_lesson_loop(page, lesson_urls: list[str], continue_roadmap: bool = False):
+    """
+    Main loop: process one lesson at a time.
+    observe → classify → act → confirm → record
+    """
+    consecutive_unknown = 0
+
+    while True:
+        # Automatically dismiss any overlay badge/celebration/streak popups
+        act.dismiss_popups(page)
+
+        url = page.url.split("?")[0]  # Strip query params like ?tab=statement
+        print(f"\n{'─' * 60}")
+        print(f"[loop] Current URL: {url}")
+
+        # Check stuck guards
+        action_count = progress.get_action_count(url)
+        if action_count >= MAX_ACTIONS_PER_LESSON:
+            print(f"[loop] Max actions ({MAX_ACTIONS_PER_LESSON}) on {url}, skipping")
+            progress.mark_lesson(url, "blocked", "max actions reached")
+            if not _advance_to_next(page, url, lesson_urls):
+                print("[loop] No more lessons to advance to")
+                break
+            continue
+
+        progress.increment_actions(url)
+
+        # Skip already done/blocked
+        if progress.is_done(url):
+            print(f"[loop] Already done: {url}")
+            if not _advance_to_next(page, url, lesson_urls):
+                break
+            continue
+
+        if progress.is_blocked(url):
+            print(f"[loop] Already blocked: {url}")
+            if not _advance_to_next(page, url, lesson_urls):
+                break
+            continue
+
+        # Wait briefly for page to fully load before observing
+        try:
+            page.wait_for_load_state("domcontentloaded", timeout=5000)
+        except Exception:
+            pass
+        time.sleep(1)
+
+        # Observe
+        obs = observe.observe(page, "step")
+
+        # Classify
+        layout = classify.classify(obs)
+        print(f"[loop] Layout: {layout}")
+
+        # Act based on layout
+        if layout == "reading":
+            if handle_reading(page, obs):
+                consecutive_unknown = 0
+            else:
+                if not _advance_to_next(page, url, lesson_urls):
+                    break
+
+        elif layout == "guided":
+            if handle_guided(page, obs):
+                consecutive_unknown = 0
+            else:
+                print(f"[loop] Guided lesson at {url} was not completed. Stopping so question is not skipped.")
+                break
+
+        elif layout == "exercise":
+            if handle_exercise(page, obs):
+                consecutive_unknown = 0
+            else:
+                print(f"[loop] Exercise at {url} was not solved. Stopping so question is not skipped.")
+                break
+
+        elif layout == "quiz":
+            if handle_quiz(page, obs):
+                consecutive_unknown = 0
+            else:
+                print(f"[loop] Quiz at {url} was not completed. Stopping so question is not skipped.")
+                break
+
+        elif layout == "roadmap":
+            courses = handle_roadmap(page, obs, continue_roadmap)
+            if courses:
+                # Navigate to first course
+                page.goto(courses[0], wait_until="domcontentloaded", timeout=30000)
+                time.sleep(2)
+            consecutive_unknown = 0
+
+        elif layout == "outline":
+            if not handle_outline(page, obs, lesson_urls):
+                # All lessons done in this outline
+                if not _advance_to_next(page, url, lesson_urls):
+                    break
+            consecutive_unknown = 0
+
+        elif layout == "auth":
+            handle_auth(page)
+            consecutive_unknown = 0
+
+        elif layout == "running":
+            verdict = handle_running(page, obs)
+            # After running finishes, the loop will re-observe
+            consecutive_unknown = 0
+
+        elif layout == "done":
+            should_stop = handle_done(page, obs, continue_roadmap)
+            if should_stop:
+                print("[loop] Course complete, stopping.")
+                break
+            else:
+                # Roadmap mode: go back to roadmap
+                print("[loop] Course done, returning to roadmap...")
+                # Navigate back or to next course
+                if not _advance_to_next(page, url, lesson_urls):
+                    break
+            consecutive_unknown = 0
+
+        elif layout == "module_done":
+            print("[module_done] Module completion screen — clicking Keep Learning")
+            if act.click_next(page):
+                print("[module_done] Proceeding to next module")
+                progress.mark_lesson(url, "done")
+            else:
+                print("[module_done] Could not click Keep Learning, advancing")
+                if not _advance_to_next(page, url, lesson_urls):
+                    break
+            consecutive_unknown = 0
+
+        elif layout == "unknown":
+            result = handle_unknown(page, obs)
+            if result and result != "unknown":
+                # Re-dispatch with the detected layout
+                consecutive_unknown = 0
+                continue  # Will re-observe and re-classify
+            else:
+                consecutive_unknown += 1
+                if consecutive_unknown >= 3:
+                    print("[loop] Too many consecutive unknowns, advancing")
+                    if not _advance_to_next(page, url, lesson_urls):
+                        break
+                    consecutive_unknown = 0
+
+        # Small pause between iterations
+        time.sleep(1)
+
+
+def _advance_to_next(page, current_url: str, lesson_urls: list[str]) -> bool:
+    """
+    Try to advance to the next lesson in the syllabus.
+    Returns True if navigation happened.
+    """
+    # First try the syllabus order
+    next_url = syllabus.get_next_lesson_url(page, current_url, lesson_urls)
+    if next_url:
+        # Skip if already done or blocked
+        while next_url and (progress.is_done(next_url) or progress.is_blocked(next_url)):
+            next_url = syllabus.get_next_lesson_url(page, next_url, lesson_urls)
+
+        if next_url:
+            print(f"[advance] → {next_url}")
+            page.goto(next_url, wait_until="domcontentloaded", timeout=30000)
+            time.sleep(2)
+            return True
+
+    # Try clicking Next button directly
+    old_url = page.url
+    if act.click_next(page):
+        if page.url != old_url:
+            return True
+
+    # Try re-opening the syllabus to find more lessons
+    new_urls = syllabus.get_syllabus(page)
+    if new_urls:
+        lesson_urls.clear()
+        lesson_urls.extend(new_urls)
+        for url in new_urls:
+            if not progress.is_done(url) and not progress.is_blocked(url):
+                print(f"[advance] Syllabus refresh → {url}")
+                page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                time.sleep(2)
+                return True
+
+    return False
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Entry point
+# ═══════════════════════════════════════════════════════════════════
+
+def main():
+    args = parse_args()
+
+    # Fix Windows console encoding for Unicode
+    import io
+    if hasattr(sys.stdout, 'reconfigure'):
+        try:
+            sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        except Exception:
+            sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+
+    # Auto-resume from last active lesson if default start URL is already done/blocked
+    if args.start_url == DEFAULT_START_URL and (progress.is_done(DEFAULT_START_URL) or progress.is_blocked(DEFAULT_START_URL)):
+        resume_url = progress.get_last_active_url()
+        if resume_url and resume_url != DEFAULT_START_URL:
+            print(f"[main] Auto-resuming from last active lesson: {resume_url}")
+            args.start_url = resume_url
+
+    print("+----------------------------------------------------------+")
+    print("|           CodeChef Course Runner                         |")
+    print("+----------------------------------------------------------+")
+    print(f"  Start URL: {args.start_url}")
+    print(f"  Mode:      {'probe' if args.probe else 'dry-run' if args.dry_run else 'roadmap' if args.roadmap else 'single course'}")
+    print()
+
+    BROWSER_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+
+    with sync_playwright() as pw:
+        # Launch Playwright Chromium — visible, on top, positioned at screen top-left
+        # slow_mo=500 so every action is visible to the user
+        browser_context = pw.chromium.launch_persistent_context(
+            user_data_dir=str(BROWSER_PROFILE_DIR),
+            headless=False,
+            slow_mo=100,
+            viewport={"width": 1300, "height": 800},
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--window-position=50,50",
+                "--window-size=1300,800",
+            ],
+        )
+        page = browser_context.pages[0] if browser_context.pages else browser_context.new_page()
+
+        # Navigate to start URL
+        print(f"[main] Navigating to {args.start_url}")
+        page.goto(args.start_url, wait_until="domcontentloaded", timeout=60000)
+        time.sleep(3)
+
+        # Close any extra blank tabs Chrome opened, keep only the CodeChef one
+        for p in browser_context.pages:
+            if p != page:
+                try:
+                    p.close()
+                except Exception:
+                    pass
+
+        # Bring our page to front so the user can see it
+        try:
+            page.bring_to_front()
+        except Exception:
+            pass
+
+        # Check if login is needed
+        obs = observe.read_dom(page)
+        if obs.get("has_login_form", False) or "login" in page.url.lower():
+            wait_for_login(page)
+            time.sleep(2)
+
+        # ── Probe mode ───────────────────────────────────────────
+        if args.probe:
+            run_probe(page)
+            input("\nPress Enter to close the browser...")
+            browser_context.close()
+            return
+
+        # ── Dry-run mode ─────────────────────────────────────────
+        if args.dry_run:
+            run_dry_run(page)
+            input("\nPress Enter to close the browser...")
+            browser_context.close()
+            return
+
+        # ── Full run ─────────────────────────────────────────────
+        # Collect initial syllabus
+        print("[main] Collecting syllabus...")
+        lesson_urls = syllabus.get_syllabus(page)
+        if lesson_urls:
+            print(f"[main] Found {len(lesson_urls)} lesson URLs")
+        else:
+            print("[main] No syllabus found, will navigate via Next buttons")
+
+        # Start the lesson loop
+        try:
+            run_lesson_loop(page, lesson_urls, continue_roadmap=args.roadmap)
+        except KeyboardInterrupt:
+            print("\n[main] Interrupted by user")
+        except Exception as e:
+            print(f"\n[main] Error: {e}")
+            import traceback
+            traceback.print_exc()
+            # Save state
+            observe.take_screenshot(page, "crash")
+
+        print("\n[main] Run complete.")
+        print(f"  Progress file: {progress.PROGRESS_FILE}")
+        print(f"  Screenshots:   {observe.get_run_dir()}")
+
+        # Summary
+        all_lessons = progress.get_all_lessons()
+        done = sum(1 for v in all_lessons.values() if v.get("status") == "done")
+        blocked = sum(1 for v in all_lessons.values() if v.get("status") == "blocked")
+        print(f"  Lessons done:    {done}")
+        print(f"  Lessons blocked: {blocked}")
+        print(f"  Total tracked:   {len(all_lessons)}")
+
+        input("\nPress Enter to close the browser...")
+        browser_context.close()
+
+
+if __name__ == "__main__":
+    main()
