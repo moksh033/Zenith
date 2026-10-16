@@ -94,11 +94,8 @@ Zenith/
 └── .env.example
 ```
 
-## Privacy
-
-Your session cookies (`.browser-profile/`) and API keys (`.env`) are ignored by `.gitignore` and remain strictly on your local machine.
-
 ## Working Demo Clip
 
-https://github.com/moksh033/Zenith-/releases/download/v1.0.0/CodeChef.mp4
+https://github.com/moksh033/Zenith-/raw/main/assets/CodeChef.mp4
+
 
