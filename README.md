@@ -96,6 +96,7 @@ Zenith/
 
 ## Working Demo Clip
 
-https://github.com/moksh033/Zenith-/raw/main/assets/CodeChef.mp4
+https://github.com/user-attachments/assets/0f683962-ad24-45a0-8c13-b8e76e1636a9
+
 
 
