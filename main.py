@@ -847,6 +847,17 @@ def _advance_to_next(page, current_url: str, lesson_urls: list[str]) -> bool:
                 time.sleep(2)
                 return True
 
+    # Try clicking Next Course button if end of course is reached
+    try:
+        next_course = page.locator('button:has-text("Next Course"), a:has-text("Next Course"), button:has-text("Start Next Course"), a:has-text("Start Next Course")')
+        if next_course.count() > 0 and next_course.first.is_visible(timeout=1000):
+            print("[advance] End of course reached, clicking Next Course...")
+            next_course.first.click()
+            time.sleep(3)
+            return True
+    except Exception:
+        pass
+
     return False
 
 

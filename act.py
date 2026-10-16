@@ -129,12 +129,13 @@ def click_next(page: Page, timeout: int = 10000) -> bool:
         # Find the Next button — try several selectors
         next_btn = None
 
-        # Priority 0: "Keep Learning" button (module completion screens)
+        # Priority 0: "Keep Learning" / "Next Course" (module / course completion screens)
         try:
-            keep_btn = page.locator('button:has-text("Keep Learning"), a:has-text("Keep Learning")')
+            keep_btn = page.locator('button:has-text("Keep Learning"), a:has-text("Keep Learning"), button:has-text("Next Course"), a:has-text("Next Course"), button:has-text("Start Next Course"), a:has-text("Start Next Course")')
             if keep_btn.count() > 0 and keep_btn.first.is_visible(timeout=1000):
                 next_btn = keep_btn.first
-                print("[act] Found 'Keep Learning' button")
+                btn_name = (next_btn.text_content() or "Next").strip()
+                print(f"[act] Found navigation button: '{btn_name}'")
         except Exception:
             pass
 
