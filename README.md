@@ -1,131 +1,102 @@
-# ⚡ Zenith – CodeChef Autonomous Course Solver
+# Zenith
 
-An intelligent, autonomous bot built with **Playwright** and **LLM inference** to complete CodeChef courses seamlessly. It navigates reading lessons, automatically answers multiple-choice quizzes, fetches instructor solutions, fixes compilation/runtime errors, and dismisses reward popups—all in real-time.
+Autonomous CodeChef course solver built with Playwright and LLMs. It steps through reading lessons, solves multiple-choice quizzes with DOM validation, extracts verified instructor solutions from the problem interface, repairs incorrect code submissions, and handles overlay dialogs automatically.
 
----
+## Quick Start (Release)
 
-## 📦 Download & Run (No Git Required)
+For users running the pre-packaged release on Windows:
 
-If you downloaded a **Release ZIP** (`Zenith.zip`):
-1. **Extract the ZIP file** to a folder on your computer.
-2. Double-click **`run.bat`**.
-   - If it's your first time, it will automatically open `.env` in Notepad. Paste your free API key (Groq, OpenRouter, or Gemini) and save.
-   - It will install dependencies and launch the browser.
-3. **Log in to CodeChef** in the browser window that opens.
-4. **That's it!** The bot starts solving courses automatically.
+1. Download `Zenith-v1.0.0.zip` from the [Releases](https://github.com/moksh033/Zenith-/releases) page and extract it.
+2. Double-click `run.bat`.
+3. If running for the first time, `.env` will open in Notepad. Add an API key from OpenRouter, Groq, or Gemini, then save and close the file.
+4. When the browser launches, log in to your CodeChef account.
+5. The runner detects your session and begins automatically.
 
----
+## Quick Start (From Source)
 
-## ✨ Features
+### Requirements
+- Python 3.10+
+- Chromium (managed by Playwright)
 
-- 🧠 **Multi-Tier AI Brain**: Supports **OpenRouter**, **Groq** (free tier), and **Google Gemini** for intelligent code generation, error repair, and quiz answering.
-- 🎯 **Solution-Tab Priority**: Automatically copies verified instructor code whenever available before querying AI, minimizing token consumption and ensuring 100% acceptance.
-- ✅ **Verified Quiz Answering**: Checks DOM verdict styles and banners to ensure quiz questions are never skipped or marked done prematurely.
-- 🏆 **Auto-Dismiss Badges & Popups**: Automatically detects and dismisses "You've earned a diamond badge", streak celebrations, and modal overlays.
-- 💾 **Persistent Auto-Resume**: Tracks progress in `progress.json`. If you stop or restart, the runner automatically resumes exactly where you left off.
-- 🔒 **Safe Local Authentication**: You log in directly in the browser on first run. Your credentials are never stored or touched by the bot.
+### Setup
 
----
-
-## 🚀 Quick Start Guide (Developers)
-
-### 1. Prerequisites
-- **Python 3.10+** installed
-- Git installed
-
-### 2. Clone the Repository
 ```bash
 git clone https://github.com/moksh033/Zenith-.git
 cd Zenith-
-```
-
-### 3. Install Dependencies
-```bash
 pip install -r requirements.txt
 playwright install chromium
 ```
 
-### 4. Configure Your API Key
-Copy the example environment file:
-```bash
-# On Linux / macOS:
-cp .env.example .env
+Copy the example environment configuration:
 
-# On Windows (PowerShell or Command Prompt):
+```bash
+# Windows
 copy .env.example .env
+
+# Linux / macOS
+cp .env.example .env
 ```
 
-Open `.env` in any text editor and add at least **one** of the following:
+Add your API key to `.env`:
 
 ```env
-# Option 1: OpenRouter (Recommended) - https://openrouter.ai/keys
-OPENROUTER_API_KEY=your_key_here
-
-# Option 2: Groq (Fast & Free Tier available) - https://console.groq.com/keys
-GROQ_API_KEY=your_key_here
-
-# Option 3: Google Gemini (Free tier available) - https://aistudio.google.com/apikey
-GEMINI_API_KEY=your_key_here
+# Supported providers (specify at least one):
+OPENROUTER_API_KEY=
+GROQ_API_KEY=
+GEMINI_API_KEY=
 ```
 
-### 5. Launch the Solver
+Start the runner:
+
 ```bash
 python main.py
 ```
 
----
+## How It Works
 
-## 🔑 How Login Works
+- **Solution Tab Extraction**: Before querying an LLM, the solver checks the problem's Solution tab. If official code exists, it copies and submits it directly to avoid unnecessary API usage.
+- **Quiz Verification**: Evaluates DOM feedback directly (border colors, error banners, and score indicators) to verify answers rather than relying on navigation button state. It cycles through all available choices until confirmed.
+- **Modal and Popup Handling**: Detects and dismisses overlay dialogs (e.g. badge awards, streak confirmations, celebration popups) that intercept pointer events.
+- **Session Persistence**: Browser state and cookies are saved in `.browser-profile/`. You only need to log in once.
+- **State Recovery**: Progress is tracked in `progress.json`. Interrupted runs automatically resume from the last active problem.
 
-1. On your very first run, a visible Chromium browser window will launch.
-2. If you are not logged in, the terminal will display:
-   ```
-   FIRST LAUNCH – Please log in to CodeChef in the browser.
-   The runner will continue automatically after login.
-   ```
-3. Log into your own CodeChef account manually (via Email, Google, GitHub, etc.).
-4. The solver automatically detects your login and starts solving immediately!
-5. Your session cookies are stored locally in `.browser-profile/` (which is git-ignored), so you will **never** have to log in again on future runs.
+## CLI Reference
 
----
-
-## 🛠️ CLI Options
-
-| Command | Description |
-|---|---|
-| `python main.py` | Auto-resumes from your last active lesson or default course. |
-| `python main.py --start-url <URL>` | Start solving from a specific problem/lesson URL. |
-| `python main.py --roadmap` | Automatically continue through all courses in the roadmap. |
-| `python main.py --dry-run` | Inspect and classify the current page without clicking anything. |
-| `python main.py --probe` | Dump DOM elements, buttons, and syllabus links for debugging. |
-
-### Example: Starting a Specific Problem
 ```bash
+# Resume from last active problem (default)
+python main.py
+
+# Start from a specific lesson URL
 python main.py --start-url https://www.codechef.com/learn/course/c/XEIBAYB/problems/CDEVPROB130
+
+# Continue through roadmap courses sequentially
+python main.py --roadmap
+
+# Inspect and classify the current page without clicking
+python main.py --dry-run
+
+# Output DOM structure, buttons, and detected syllabus
+python main.py --probe
 ```
 
----
-
-## 📂 Project Architecture
+## Project Structure
 
 ```
-CodeChef Solver/
-├── main.py            # CLI entry point, navigation loop, and event handlers
-├── act.py             # Browser interaction: clicks, submits, popup dismissals
-├── classify.py        # DOM layout classification (quiz, exercise, reading, etc.)
-├── editor.py          # Monaco editor interaction and language detection
-├── observe.py         # Page DOM observation and screenshot management
-├── progress.py        # Persistent progress tracking & resume engine
-├── solve.py           # Multi-tier LLM solver (OpenRouter, Groq, Gemini)
-├── syllabus.py        # Course outline & lesson URL extraction
-├── requirements.txt   # Python package dependencies
-├── .env.example       # Template for environment configuration
-└── .gitignore         # Ignores local session cookies, progress, and keys
+Zenith/
+├── main.py            # Entry point, navigation loop, and layout handlers
+├── act.py             # Action execution (clicks, submissions, popup dismissal)
+├── classify.py        # Layout classification (quiz, exercise, reading, etc.)
+├── editor.py          # Monaco editor interface and language selection
+├── observe.py         # DOM state extraction and run logging
+├── progress.py        # Persistent progress tracking and resume logic
+├── solve.py           # Multi-provider LLM interface (OpenRouter, Groq, Gemini)
+├── syllabus.py        # Course outline and problem navigation parsing
+├── requirements.txt   # Core Python dependencies
+├── run.bat            # Windows bootstrap script
+├── .env.example       # Environment configuration template
+└── .gitignore         # Excludes credentials, session state, and local runs
 ```
 
----
+## Privacy & Security
 
-## 🛡️ Safety & Disclaimer
-
-- **Session Privacy**: The `.browser-profile/` directory and `.env` file are explicitly included in `.gitignore`. Your login cookies and API keys will never be accidentally committed to GitHub.
-- **Educational Use**: This project was developed for educational purposes to demonstrate browser automation with Playwright and LLM reasoning. Use responsibly.
+- `.env` and `.browser-profile/` are excluded by `.gitignore`. Local session cookies and API keys remain on your machine and are never pushed to the remote repository.
