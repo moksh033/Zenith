@@ -260,67 +260,6 @@ def click_next(page: Page, timeout: int = 10000) -> bool:
     old_heading = _get_heading(page)
 
     try:
-        # Find the Next button — try several selectors
-        next_btn = None
-
-        # Priority 1: the bottom-right button-styled Next (screenshots 2-4)
-        if next_btn is None:
-            selectors = [
-                'button:text-is("Next")',
-                'button:has-text("Next")',
-                'a:has-text("Next")',
-                '[class*="next"] button',
-            ]
-            for sel in selectors:
-                try:
-                    loc = page.locator(sel)
-                    if loc.count() > 0:
-                        for i in range(loc.count()):
-                            btn = loc.nth(i)
-                            if btn.is_visible(timeout=1000):
-                                text = (btn.text_content() or "").strip()
-                                if _is_denied(text):
-                                    continue
-                                # Skip "Prev module" / "Next module" if a plain
-                                # "Next" button exists later
-                                if "module" in text.lower():
-                                    continue
-                                next_btn = btn
-                                break
-                    if next_btn:
-                        break
-                except Exception:
-                    continue
-
-        if next_btn is None:
-            # Priority 2: top-right nav-bar "Next >" (visible in screenshots)
-            try:
-                top_next = page.locator('a:text-is("Next"), span:text-is("Next")')
-                for i in range(top_next.count()):
-                    btn = top_next.nth(i)
-                    if btn.is_visible(timeout=1000):
-                        text = (btn.text_content() or "").strip()
-                        if not _is_denied(text):
-                            next_btn = btn
-                            break
-            except Exception:
-                pass
-
-        if next_btn is None:
-            # Priority 3: any remaining element with the word "Next"
-            try:
-                nav_next = page.locator('text="Next"').last
-                if nav_next.is_visible(timeout=1000):
-                    text = (nav_next.text_content() or "").strip()
-                    if not _is_denied(text):
-                        next_btn = nav_next
-            except Exception:
-                pass
-
-        if next_btn is None:
-            print("[act] No Next button found")
-            return False
-
         # Helper to check if element is disabled or has disabled class
         def _is_el_disabled(el) -> bool:
             try:
@@ -335,31 +274,63 @@ def click_next(page: Page, timeout: int = 10000) -> bool:
             except Exception:
                 return False
 
-        # Wait up to 3 seconds for Next button to become enabled after verdict animation
-        is_disabled = True
-        for _ in range(6):
-            if not _is_el_disabled(next_btn):
-                is_disabled = False
-                break
-            time.sleep(0.5)
-
-        if is_disabled:
-            print("[act] Primary Next button disabled, checking alternative Next elements...")
+        # Find Next button candidates (top navbar Next >, bottom bar Next, links, buttons)
+        selectors = [
+            'button:has-text("Next")',
+            'a:has-text("Next")',
+            '[role="button"]:has-text("Next")',
+            'span:has-text("Next")',
+            'div:has-text("Next")',
+            '[class*="next"]:not([class*="prev"])',
+        ]
+        candidates = []
+        for sel in selectors:
             try:
-                alternatives = page.locator('button:has-text("Next"), a:has-text("Next")')
-                for i in range(alternatives.count()):
-                    cand = alternatives.nth(i)
-                    if cand.is_visible(timeout=500) and not _is_el_disabled(cand):
-                        text = (cand.text_content() or "").strip()
-                        if not _is_denied(text) and "prev" not in text.lower():
-                            next_btn = cand
-                            is_disabled = False
-                            break
+                loc = page.locator(sel)
+                for i in range(loc.count()):
+                    btn = loc.nth(i)
+                    if not btn.is_visible(timeout=300):
+                        continue
+                    text = (btn.text_content() or "").strip()
+                    if _is_denied(text):
+                        continue
+                    lower_text = text.lower()
+                    if "prev" in lower_text:
+                        continue
+                    if "module" in lower_text:
+                        continue
+                    if "next" in lower_text or "next" in (btn.get_attribute("class") or "").lower():
+                        if len(text) <= 30:
+                            candidates.append((btn, text))
             except Exception:
-                pass
+                continue
+
+        # Choose the first enabled candidate
+        for cand, t in candidates:
+            if not _is_el_disabled(cand):
+                next_btn = cand
+                print(f"[act] Found active Next button: '{t}'")
+                break
+
+        if next_btn is None and candidates:
+            next_btn = candidates[0][0]
+            print(f"[act] Selected candidate Next button: '{candidates[0][1]}'")
+
+        if next_btn is None:
+            print("[act] No Next button found")
+            return False
+
+        # Wait up to 3 seconds for Next button to become enabled if currently disabled
+        is_disabled = _is_el_disabled(next_btn)
+        if is_disabled:
+            for _ in range(6):
+                time.sleep(0.5)
+                if not _is_el_disabled(next_btn):
+                    is_disabled = False
+                    break
 
         if is_disabled:
-            print("[act] All Next buttons are currently disabled")
+            print("[act] Selected Next button is disabled")
             return False
 
         # Check if Next button is a link or inside a link with an href
@@ -389,7 +360,7 @@ def click_next(page: Page, timeout: int = 10000) -> bool:
                 next_btn.click(timeout=2500, force=True)
             except Exception:
                 try:
-                    page.evaluate("el => el.click()", next_btn.element_handle())
+                    page.evaluate("el => { (el.closest('a, button, [role=\"button\"]') || el).click(); }", next_btn.element_handle())
                 except Exception:
                     pass
 
@@ -528,7 +499,7 @@ def _read_verdict(page: Page) -> str:
                 const match = text.match(/Status\s*:\s*([^\n\r]+)/i);
                 if (match) {
                     const statusVal = match[1].toLowerCase().trim();
-                    if (statusVal.includes('correct answer') || statusVal.includes('accepted')) {
+                    if (statusVal.includes('correct answer') || statusVal.includes('accepted') || statusVal.includes('well done') || statusVal.includes("it's correct")) {
                         return 'accepted';
                     }
                     if (statusVal.includes('compilation error') || statusVal.includes('compile error')) {
@@ -549,29 +520,45 @@ def _read_verdict(page: Page) -> str:
                 }
             }
 
-            // 2. Check dedicated verdict banners / badges / cards
-            const verdictSelectors = [
+            // 2. Check dedicated feedback banners, alert cards, and verdict containers
+            // CodeChef uses "Well done, it's correct!", "Correct Answer", "All test cases passed"
+            const positivePhrases = [
+                "well done", "it's correct", "its correct", "correct answer",
+                "all test cases passed", "passed all test cases", "100% score", "correct!"
+            ];
+            const negativePhrases = [
+                "wrong answer", "incorrect", "test case failed", "try again",
+                "not accepted", "failed", "compilation error", "fatal error"
+            ];
+
+            const feedbackSelectors = [
                 '[class*="submission-status"]',
                 '[class*="verdict"]',
                 '[class*="status-badge"]',
                 '[class*="test-result"]',
                 '[class*="judge-output"]',
                 '[class*="result-banner"]',
+                '[class*="banner"]',
+                '[class*="alert"]',
+                '[class*="feedback"]',
+                '[class*="message"]',
+                '[class*="success"]',
+                '[class*="correct"]',
             ];
-            for (const sel of verdictSelectors) {
+            for (const sel of feedbackSelectors) {
                 const nodes = document.querySelectorAll(sel);
                 for (const node of nodes) {
                     if (node.offsetParent === null) continue;
                     const t = getCleanText(node).toLowerCase();
-                    if (t.includes('correct answer') || t.includes('all test cases passed') || t === 'accepted') {
-                        if (!t.includes('not accepted') && !t.includes('0/')) {
+                    if (positivePhrases.some(p => t.includes(p))) {
+                        if (!negativePhrases.some(p => t.includes(p))) {
                             return 'accepted';
                         }
                     }
                     if (t.includes('compilation error') || t.includes('fatal error:')) {
                         return 'compile_error';
                     }
-                    if (t.includes('wrong answer') || t.includes('test case failed')) {
+                    if (t.includes('wrong answer') || t.includes('test case failed') || t.includes('try again')) {
                         return 'wrong_answer';
                     }
                     if (t.includes('runtime error') || t.includes('sigsegv') || t.includes('nzec')) {
@@ -583,7 +570,23 @@ def _read_verdict(page: Page) -> str:
                 }
             }
 
-            // 3. Check for visible compiler error box
+            // 3. Scan all visible elements for short feedback lines (e.g. "✓ Well done, it's correct!")
+            for (const el of allElements) {
+                if (el.offsetParent === null) continue;
+                const t = getCleanText(el).toLowerCase();
+                if (t.length > 0 && t.length < 150) {
+                    if (positivePhrases.some(p => t.includes(p))) {
+                        if (!negativePhrases.some(p => t.includes(p))) {
+                            return 'accepted';
+                        }
+                    }
+                    if (t.includes('try again') || t.includes('wrong answer') || t.includes('incorrect answer')) {
+                        return 'wrong_answer';
+                    }
+                }
+            }
+
+            // 4. Check for visible compiler error box
             const errBox = document.querySelector('.error, [class*="error-container"], [class*="errorMessage"]');
             if (errBox && errBox.offsetParent !== null) {
                 const t = getCleanText(errBox).toLowerCase();
@@ -592,7 +595,7 @@ def _read_verdict(page: Page) -> str:
                 }
             }
 
-            // 4. Check if currently evaluating/running
+            // 5. Check if currently evaluating/running
             const isRunning = Array.from(document.querySelectorAll('*')).some(el => {
                 if (el.offsetParent === null) return false;
                 const t = getCleanText(el).toLowerCase();

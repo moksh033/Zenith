@@ -447,12 +447,17 @@ def handle_guided(page, obs):
                 act.jitter_delay()
                 progress.increment_submits(url)
                 if act.click_submit(page):
-                    verdict2 = act.wait_for_verdict(page, timeout=30000)
+                    verdict2 = act.wait_for_verdict(page, timeout=45000)
                     print(f"[guided] Repair verdict: {verdict2}")
                     if verdict2 == "accepted":
+                        print("[guided] Repair submission ACCEPTED! Advancing to next problem...")
                         act.jitter_delay(1, 2)
                         progress.mark_lesson(url, "done")
-                        if not act.click_next(page):
+                        advanced = act.click_keep_learning(page, timeout=3000)
+                        if not advanced:
+                            advanced = act.click_next(page)
+                        if not advanced:
+                            print("[guided] Click Next didn't advance, advancing via syllabus...")
                             _advance_to_next(page, url, [u for u in progress.get_all_lessons()])
                         return True
 
