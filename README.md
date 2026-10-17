@@ -29,8 +29,8 @@ If you downloaded `Zenith-v1.0.0.zip` from Releases:
 ### Installation
 
 ```bash
-git clone https://github.com/moksh033/Zenith-.git
-cd Zenith-
+git clone https://github.com/moksh033/Zenith.git
+cd Zenith
 pip install -r requirements.txt
 playwright install chromium
 ```
