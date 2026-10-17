@@ -42,8 +42,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description="CodeChef Course Runner")
     parser.add_argument(
         "--start-url",
-        default=DEFAULT_START_URL,
-        help="Lesson URL to start from",
+        default=None,
+        help="Lesson URL to start from (prompts interactively if omitted)",
     )
     parser.add_argument(
         "--probe",
@@ -63,43 +63,182 @@ def parse_args():
     return parser.parse_args()
 
 
-def wait_for_login(page):
-    """
-    On first launch, wait for the user to log in.
-    Detects login by checking for user-specific elements.
-    """
-    print("\n" + "=" * 60)
-    print("  FIRST LAUNCH – Please log in to CodeChef in the browser.")
-    print("  The runner will continue automatically after login.")
-    print("=" * 60 + "\n")
+def get_starting_url(cli_url: str | None) -> str:
+    """Prompt the user for the CodeChef problem/course URL or use CLI/resume."""
+    if cli_url:
+        print(f"[main] Using start URL from CLI: {cli_url}")
+        return cli_url
 
-    while True:
-        try:
-            logged_in = page.evaluate("""() => {
-                // Check for "Hello, <username>" in navbar (CodeChef pattern)
-                const nav = document.querySelector('nav, header');
-                if (nav) {
-                    const text = nav.textContent || '';
-                    if (text.includes('Hello,') || text.includes('Hello ')) return true;
+    resume_url = progress.get_last_active_url()
+    default_url = resume_url if resume_url else DEFAULT_START_URL
+
+    print("\n" + "=" * 62)
+    print("           CodeChef Autonomous Course Solver")
+    print("=" * 62)
+    if resume_url:
+        print(f"  [Resume available]: {resume_url}")
+    else:
+        print(f"  [Default]: {DEFAULT_START_URL}")
+    print("=" * 62)
+
+    prompt = (
+        "\nEnter CodeChef problem/course URL to start with\n"
+        f"(Press Enter to {'resume last problem' if resume_url else 'use default'}): "
+    )
+    try:
+        user_input = input(prompt).strip()
+    except (EOFError, KeyboardInterrupt):
+        print("\n[main] Exiting.")
+        sys.exit(0)
+
+    if user_input:
+        user_input = user_input.strip('"\'')
+        if not user_input.startswith("http"):
+            user_input = "https://" + user_input
+        return user_input
+
+    return default_url
+
+
+def is_logged_in(page, context=None) -> bool:
+    """Check if the user is authenticated on CodeChef."""
+    current_url = page.url.lower()
+    if "/login" in current_url or "/signup" in current_url or "/register" in current_url:
+        return False
+
+    try:
+        dom_status = page.evaluate("""() => {
+            // Check for explicit login/signup button or link
+            const loginBtn = Array.from(document.querySelectorAll('a, button, [role="button"]')).some(el => {
+                const href = (el.getAttribute('href') || '').toLowerCase();
+                const text = (el.textContent || '').trim().toLowerCase();
+                if (href.includes('/login') || href.includes('/signup')) {
+                    const rect = el.getBoundingClientRect();
+                    return rect.width > 0 && rect.height > 0;
                 }
-                // Check for user menu, avatar, or username indicators
-                const userIndicators = [
-                    '[class*="user-menu"]', '[class*="avatar"]',
-                    '[class*="profile"]', 'a[href*="/users/"]',
-                    '[class*="logged-in"]', '[class*="user-nav"]',
-                    'img[alt*="avatar" i]', 'img[alt*="profile" i]',
-                ];
-                for (const sel of userIndicators) {
-                    if (document.querySelector(sel)) return true;
+                if (text === 'log in' || text === 'login' || text === 'sign in') {
+                    const rect = el.getBoundingClientRect();
+                    return rect.width > 0 && rect.height > 0;
                 }
                 return false;
-            }""")
-            if logged_in:
-                print("[login] User is logged in!")
+            });
+            if (loginBtn) return false;
+
+            // Check for profile or user handle link
+            const userLink = document.querySelector('a[href^="/users/"], a[href*="codechef.com/users/"]');
+            if (userLink) return true;
+
+            // Check for logout link
+            const logoutLink = document.querySelector('a[href*="/logout"], button[class*="logout"]');
+            if (logoutLink) return true;
+
+            // Check for user-menu or avatar element
+            const userMenu = document.querySelector('[class*="user-menu"], [class*="profile-menu"], [class*="avatar-dropdown"], [id*="user-dropdown"]');
+            if (userMenu) return true;
+
+            return null;
+        }""")
+        if dom_status is True:
+            return True
+        if dom_status is False:
+            return False
+    except Exception:
+        pass
+
+    # Check cookies in context
+    if context:
+        try:
+            cookies = context.cookies()
+            auth_cookie_names = {'remember_user_token', 'cc_auth', 'session_id', 'access_token'}
+            for c in cookies:
+                if 'codechef.com' in c.get('domain', '') and c.get('name') in auth_cookie_names:
+                    if len(c.get('value', '')) > 10:
+                        return True
+        except Exception:
+            pass
+
+    return False
+
+
+def wait_for_login(page, context=None):
+    """Wait for human user to complete login in the browser."""
+    print("\n" + "=" * 60)
+    print("  [ACTION REQUIRED] Please log into CodeChef in Chromium.")
+    print("  The runner will automatically detect login and continue.")
+    print("=" * 60 + "\n")
+
+    dots = 0
+    while True:
+        time.sleep(2)
+        try:
+            if is_logged_in(page, context):
+                print("\n[login] Logged in successfully!")
                 return True
         except Exception:
             pass
+        dots += 1
+        if dots % 5 == 0:
+            print("  Waiting for login in browser window...")
+
+
+def ensure_logged_in(page, context, start_url: str):
+    """
+    Ensure the user is logged into CodeChef before solving.
+    If not logged in, opens the login page, waits for login,
+    and then navigates to start_url.
+    """
+    cookies = context.cookies()
+    has_session = any('codechef.com' in c.get('domain', '') and len(c.get('value', '')) > 15 for c in cookies)
+
+    if has_session:
+        print(f"[main] Checking session on {start_url}...")
+        page.goto(start_url, wait_until="domcontentloaded", timeout=60000)
+        time.sleep(3)
+        if is_logged_in(page, context):
+            print("[auth] CodeChef login session active.")
+            return
+
+    # User is not logged in: navigate to CodeChef login page
+    print("\n" + "=" * 65)
+    print("  [LOGIN REQUIRED] You are not logged into CodeChef.")
+    print("  Opening login page in Chromium...")
+    print("  Please log into your CodeChef account in the browser window.")
+    print("  Zenith will detect your login and start solving automatically.")
+    print("=" * 65 + "\n")
+
+    if "/login" not in page.url.lower():
+        try:
+            page.goto("https://www.codechef.com/login", wait_until="domcontentloaded", timeout=60000)
+            time.sleep(2)
+        except Exception as e:
+            print(f"[auth] Notice opening login page: {e}")
+
+    try:
+        page.bring_to_front()
+    except Exception:
+        pass
+
+    # Wait for login to complete
+    logged_in = False
+    dots = 0
+    while not logged_in:
         time.sleep(2)
+        curr_url = page.url.lower()
+        if "/login" not in curr_url and "/signup" not in curr_url and "/register" not in curr_url:
+            if is_logged_in(page, context) or "codechef.com" in curr_url:
+                logged_in = True
+                break
+        dots += 1
+        if dots % 5 == 0:
+            print("  Waiting for login in browser...")
+
+    print("\n[auth] Login detected! Successfully authenticated.")
+    time.sleep(2)
+
+    # Navigate to chosen start URL
+    print(f"[main] Navigating to starting lesson: {start_url}")
+    page.goto(start_url, wait_until="domcontentloaded", timeout=60000)
+    time.sleep(3)
 
 
 def run_probe(page):
@@ -581,7 +720,7 @@ def handle_outline(page, obs, lesson_urls):
 def handle_auth(page):
     """Handle auth wall: wait for human login."""
     print("[auth] Login/verify wall detected – waiting for human...")
-    wait_for_login(page)
+    wait_for_login(page, page.context)
     time.sleep(2)
     return True
 
@@ -876,12 +1015,8 @@ def main():
         except Exception:
             sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 
-    # Auto-resume from last active lesson if default start URL is already done/blocked
-    if args.start_url == DEFAULT_START_URL and (progress.is_done(DEFAULT_START_URL) or progress.is_blocked(DEFAULT_START_URL)):
-        resume_url = progress.get_last_active_url()
-        if resume_url and resume_url != DEFAULT_START_URL:
-            print(f"[main] Auto-resuming from last active lesson: {resume_url}")
-            args.start_url = resume_url
+    # Determine starting URL (prompts interactively if not passed via CLI)
+    args.start_url = get_starting_url(args.start_url)
 
     print("+----------------------------------------------------------+")
     print("|           CodeChef Course Runner                         |")
@@ -908,11 +1043,6 @@ def main():
         )
         page = browser_context.pages[0] if browser_context.pages else browser_context.new_page()
 
-        # Navigate to start URL
-        print(f"[main] Navigating to {args.start_url}")
-        page.goto(args.start_url, wait_until="domcontentloaded", timeout=60000)
-        time.sleep(3)
-
         # Close any extra blank tabs Chrome opened, keep only the CodeChef one
         for p in browser_context.pages:
             if p != page:
@@ -927,11 +1057,8 @@ def main():
         except Exception:
             pass
 
-        # Check if login is needed
-        obs = observe.read_dom(page)
-        if obs.get("has_login_form", False) or "login" in page.url.lower():
-            wait_for_login(page)
-            time.sleep(2)
+        # Verify login and navigate to starting lesson
+        ensure_logged_in(page, browser_context, args.start_url)
 
         # ── Probe mode ───────────────────────────────────────────
         if args.probe:

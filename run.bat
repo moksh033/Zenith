@@ -1,5 +1,6 @@
 @echo off
 setlocal enabledelayedexpansion
+cd /d "%~dp0"
 title CodeChef Autonomous Solver
 echo ========================================================
 echo         CodeChef Autonomous Course Solver
