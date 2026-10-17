@@ -444,7 +444,7 @@ def handle_guided(page, obs, lesson_urls: list[str] = None):
     verdict = act.wait_for_verdict(page, timeout=15000)
     print(f"[guided] Verdict: {verdict}")
 
-    if verdict == "accepted":
+    if verdict == "accepted" or act.is_accepted_on_screen(page):
         print("[guided] Submission ACCEPTED! Moving to next problem immediately...")
         _advance_immediately(page, url, lesson_urls)
         return True
@@ -464,7 +464,7 @@ def handle_guided(page, obs, lesson_urls: list[str] = None):
                 if act.click_submit(page):
                     verdict2 = act.wait_for_verdict(page, timeout=15000)
                     print(f"[guided] Repair verdict: {verdict2}")
-                    if verdict2 == "accepted":
+                    if verdict2 == "accepted" or act.is_accepted_on_screen(page):
                         print("[guided] Repair submission ACCEPTED! Moving to next problem immediately...")
                         _advance_immediately(page, url, lesson_urls)
                         return True
@@ -547,7 +547,7 @@ def _submit_code(page, url, obs, code, source, lesson_urls: list[str] = None):
     verdict = act.wait_for_verdict(page, timeout=15000)
     print(f"[exercise] Verdict: {verdict}")
 
-    if verdict == "accepted":
+    if verdict == "accepted" or act.is_accepted_on_screen(page):
         print(f"[exercise] Submission ({source}) ACCEPTED! Moving to next problem immediately...")
         _advance_immediately(page, url, lesson_urls)
         return "accepted"
@@ -924,6 +924,13 @@ def run_lesson_loop(page, lesson_urls: list[str], continue_roadmap: bool = False
             if progress.is_blocked(url):
                 print(f"[loop] Starting URL was previously marked blocked ({url}); resetting to retry.")
                 progress.mark_lesson(url, "running")
+
+        # Check if already solved on screen (e.g. "Awesome, you nailed it!", "Well done")
+        if act.is_accepted_on_screen(page):
+            print(f"[loop] Problem at {url} already solved on screen ('Awesome, you nailed it' / 'Well done'). Advancing immediately...")
+            progress.mark_lesson(url, "done")
+            _advance_immediately(page, url, lesson_urls)
+            continue
 
         # Check stuck guards
         action_count = progress.get_action_count(url)
