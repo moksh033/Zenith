@@ -422,9 +422,13 @@ def handle_guided(page, obs):
     print(f"[guided] Verdict: {verdict}")
 
     if verdict == "accepted":
+        print("[guided] Submission ACCEPTED! Advancing to next problem...")
         act.jitter_delay(1, 2)
         progress.mark_lesson(url, "done")
-        if not act.click_next(page):
+        advanced = act.click_keep_learning(page, timeout=3000)
+        if not advanced:
+            advanced = act.click_next(page)
+        if not advanced:
             print("[guided] Click Next didn't advance, advancing via syllabus...")
             _advance_to_next(page, url, [u for u in progress.get_all_lessons()])
         return True
@@ -536,9 +540,12 @@ def _submit_code(page, url, obs, code, source):
     print(f"[exercise] Verdict: {verdict}")
 
     if verdict == "accepted":
+        print(f"[exercise] Submission ({source}) ACCEPTED! Advancing to next problem...")
         act.jitter_delay(0.5, 1.5)
         progress.mark_lesson(url, "done")
-        advanced = act.click_next(page)
+        advanced = act.click_keep_learning(page, timeout=3000)
+        if not advanced:
+            advanced = act.click_next(page)
         if not advanced:
             print("[exercise] Next button click didn't advance, advancing via syllabus...")
             act.dismiss_popups(page)
@@ -797,6 +804,48 @@ def handle_done(page, obs, continue_roadmap: bool = False):
     return not continue_roadmap  # True = stop, unless roadmap mode
 
 
+def handle_module_done(page, obs, lesson_urls: list[str]) -> bool:
+    """Handle module completion screen: click Keep Learning / Next Module or advance via syllabus."""
+    url = obs["url"].split("?")[0]
+    print(f"[module_done] Module completed at {url}!")
+    progress.mark_lesson(url, "done")
+
+    # Strategy 1: Click Keep Learning / Next Module
+    if act.click_keep_learning(page):
+        print("[module_done] Successfully clicked Keep Learning, navigating to next module...")
+        time.sleep(2)
+        return True
+
+    # Strategy 2: Fall back to click_next
+    if act.click_next(page):
+        print("[module_done] Advanced via Next button")
+        time.sleep(2)
+        return True
+
+    # Strategy 3: Refresh syllabus drawer to discover newly unlocked lessons
+    print("[module_done] Refreshing syllabus drawer to load next module lessons...")
+    try:
+        page.keyboard.press("Escape")
+        time.sleep(0.5)
+    except Exception:
+        pass
+
+    new_urls = syllabus.get_syllabus(page)
+    if new_urls:
+        lesson_urls.clear()
+        lesson_urls.extend(new_urls)
+        for u in new_urls:
+            u_clean = u.split("?")[0]
+            if not progress.is_done(u_clean) and not progress.is_blocked(u_clean):
+                print(f"[module_done] Syllabus jump to next module lesson: {u}")
+                page.goto(u, wait_until="domcontentloaded", timeout=30000)
+                time.sleep(2)
+                return True
+
+    # Strategy 4: Fallback to _advance_to_next
+    return _advance_to_next(page, url, lesson_urls)
+
+
 def handle_unknown(page, obs):
     """Handle unknown layout: try to advance before blocking."""
     url = obs["url"].split("?")[0]
@@ -989,12 +1038,10 @@ def run_lesson_loop(page, lesson_urls: list[str], continue_roadmap: bool = False
             consecutive_unknown = 0
 
         elif layout == "module_done":
-            print("[module_done] Module completion screen — clicking Keep Learning")
-            if act.click_next(page):
-                print("[module_done] Proceeding to next module")
-                progress.mark_lesson(url, "done")
+            if handle_module_done(page, obs, lesson_urls):
+                consecutive_unknown = 0
             else:
-                print("[module_done] Could not click Keep Learning, advancing")
+                print("[loop] Could not advance from module completion screen")
                 if not _advance_to_next(page, url, lesson_urls):
                     break
             consecutive_unknown = 0
@@ -1179,7 +1226,7 @@ def main():
         page, args.start_url = setup_user_session(page, browser_context, args.start_url)
 
         print("+----------------------------------------------------------+")
-        print("|                          Zenith                          |")
+        print("|                      Zenith v1.2.0                       |")
         print("+----------------------------------------------------------+")
         print(f"  Start URL: {args.start_url}")
         print(f"  Mode:      {'probe' if args.probe else 'dry-run' if args.dry_run else 'roadmap' if args.roadmap else 'single course'}")

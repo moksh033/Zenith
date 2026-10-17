@@ -12,7 +12,7 @@ Automated solver for CodeChef courses. Built with Playwright and LLMs to solve q
 
 ## Quick Start (Release)
 
-If you downloaded `Zenith-v1.1.1.zip` from Releases:
+If you downloaded `Zenith-v1.2.0.zip` from Releases:
 
 > **Prerequisite**: Python 3.10+ must be installed. When installing Python on Windows, make sure to check the box **"Add python.exe to PATH"** on the first installer screen.
 

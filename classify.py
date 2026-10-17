@@ -239,16 +239,17 @@ def classify(obs: dict) -> str:
     if has_radio and not has_editor:
         return "quiz"
 
-    # ── Module completion summary ("Keep Learning") ───────────────
-    if any("keep learning" in b for b in buttons_lower):
+    # ── Module completion summary ("Keep Learning" / "Next Module") ───────────────
+    module_btn_terms = ["keep learning", "next module", "start next module", "continue learning", "next course"]
+    if any(any(term in b for term in module_btn_terms) for b in buttons_lower):
         return "module_done"
-    if "xp gained" in page_lower or "concepts learned" in page_lower:
-        if "keep learning" in page_lower:
+    if any(k in page_lower for k in ["module completed", "module complete", "xp gained", "concepts learned", "you completed", "you've completed"]):
+        if any(b in page_lower for b in ["keep learning", "next module", "continue", "start next"]):
             return "module_done"
 
     # ── Reading page ─────────────────────────────────────────────
     if not has_submit and not has_editor:
-        if has_next or any("keep learning" in b for b in buttons_lower):
+        if has_next:
             return "reading"
         # Could be an outline page
         if "module" in page_lower or "syllabus" in page_lower:

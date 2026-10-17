@@ -116,6 +116,134 @@ def dismiss_popups(page: Page) -> bool:
     return False
 
 
+def click_keep_learning(page: Page, timeout: int = 10000) -> bool:
+    """
+    Click 'Keep Learning' / 'Next Module' after completing a module.
+    Cleans up confetti canvases and backdrop overlays, supports direct href navigation.
+    Returns True if navigation happened.
+    """
+    try:
+        old_url = page.url
+        old_heading = _get_heading(page)
+
+        # Clean up any celebration confetti or blocking backdrop overlays
+        try:
+            page.evaluate("""() => {
+                document.querySelectorAll('canvas, [class*="confetti"], [class*="celebration"]').forEach(el => el.remove());
+                document.querySelectorAll('.modal-backdrop, [class*="Backdrop-root"]').forEach(el => {
+                    if (el.style) el.style.pointerEvents = 'none';
+                });
+            }""")
+        except Exception:
+            pass
+
+        candidates = [
+            'button:has-text("Keep Learning")',
+            'a:has-text("Keep Learning")',
+            '[role="button"]:has-text("Keep Learning")',
+            'button:has-text("Continue Learning")',
+            'a:has-text("Continue Learning")',
+            'button:has-text("Next Module")',
+            'a:has-text("Next Module")',
+            'button:has-text("Start Next Module")',
+            'a:has-text("Start Next Module")',
+            'button:has-text("Next Course")',
+            'a:has-text("Next Course")',
+            'button:has-text("Start Next Course")',
+            'a:has-text("Start Next Course")',
+            'button:has-text("Continue")',
+            'a:has-text("Continue")',
+            '[role="button"]:has-text("Continue")',
+        ]
+
+        target_btn = None
+        for sel in candidates:
+            try:
+                loc = page.locator(sel)
+                for i in range(loc.count()):
+                    btn = loc.nth(i)
+                    if btn.is_visible(timeout=500):
+                        text = (btn.text_content() or "").strip().lower()
+                        if any(w in text for w in ["share", "review", "retake", "cancel"]):
+                            continue
+                        target_btn = btn
+                        print(f"[act] Found module navigation button: '{(btn.text_content() or '').strip()}'")
+                        break
+                if target_btn:
+                    break
+            except Exception:
+                continue
+
+        # If not found by explicit text, search for primary contained buttons on completion screen
+        if target_btn is None:
+            try:
+                primary = page.locator('button[class*="contained"], button[class*="primary"], button.btn-primary')
+                for i in range(primary.count()):
+                    btn = primary.nth(i)
+                    if btn.is_visible(timeout=500):
+                        text = (btn.text_content() or "").strip().lower()
+                        if not any(w in text for w in ["share", "review", "retake", "cancel", "submit", "run"]):
+                            target_btn = btn
+                            print(f"[act] Found primary module button: '{text}'")
+                            break
+            except Exception:
+                pass
+
+        if target_btn is None:
+            return False
+
+        # Extract href if available
+        href = None
+        try:
+            href = target_btn.get_attribute("href")
+            if not href:
+                parent_a = target_btn.locator('xpath=ancestor-or-self::a')
+                if parent_a.count() > 0:
+                    href = parent_a.first.get_attribute("href")
+        except Exception:
+            href = None
+
+        # Scroll into view and click
+        try:
+            target_btn.scroll_into_view_if_needed(timeout=1000)
+        except Exception:
+            pass
+
+        try:
+            target_btn.click(timeout=2500)
+        except Exception:
+            try:
+                target_btn.click(timeout=2500, force=True)
+            except Exception:
+                try:
+                    page.evaluate("el => el.click()", target_btn.element_handle())
+                except Exception:
+                    pass
+
+        # Wait for page change
+        if _wait_for_page_change(page, old_url, old_heading, timeout=8000):
+            return True
+
+        # Fallback to direct href navigation if present
+        if href and href.strip() and not href.startswith("#"):
+            try:
+                import urllib.parse
+                target_url = urllib.parse.urljoin(page.url, href)
+                if target_url.split("?")[0] != old_url.split("?")[0]:
+                    print(f"[act] Direct navigation to module href: {target_url}")
+                    page.goto(target_url, wait_until="domcontentloaded", timeout=25000)
+                    time.sleep(1.5)
+                    return True
+            except Exception as nav_err:
+                print(f"[act] Direct navigation failed: {nav_err}")
+
+        return False
+
+    except Exception as e:
+        print(f"[act] click_keep_learning failed: {e}")
+        return False
+
+
 def click_next(page: Page, timeout: int = 10000) -> bool:
     """
     Click the Next button and wait for the URL or heading to change.
@@ -124,22 +252,16 @@ def click_next(page: Page, timeout: int = 10000) -> bool:
     # Check and dismiss any popup before clicking
     dismiss_popups(page)
 
+    # If Keep Learning / Next Module button is present, prioritize it
+    if click_keep_learning(page, timeout):
+        return True
+
     old_url = page.url
     old_heading = _get_heading(page)
 
     try:
         # Find the Next button — try several selectors
         next_btn = None
-
-        # Priority 0: "Keep Learning" / "Next Course" (module / course completion screens)
-        try:
-            keep_btn = page.locator('button:has-text("Keep Learning"), a:has-text("Keep Learning"), button:has-text("Next Course"), a:has-text("Next Course"), button:has-text("Start Next Course"), a:has-text("Start Next Course")')
-            if keep_btn.count() > 0 and keep_btn.first.is_visible(timeout=1000):
-                next_btn = keep_btn.first
-                btn_name = (next_btn.text_content() or "Next").strip()
-                print(f"[act] Found navigation button: '{btn_name}'")
-        except Exception:
-            pass
 
         # Priority 1: the bottom-right button-styled Next (screenshots 2-4)
         if next_btn is None:
@@ -359,7 +481,7 @@ def click_submit(page: Page, timeout: int = 10000) -> bool:
         return False
 
 
-def wait_for_verdict(page: Page, timeout: int = 30000) -> str:
+def wait_for_verdict(page: Page, timeout: int = 45000) -> str:
     """
     Poll the output panel until a definite verdict appears or timeout.
     Returns: 'accepted', 'wrong_answer', 'compile_error', 'runtime_error', 'time_limit', or 'timeout'.
@@ -367,14 +489,22 @@ def wait_for_verdict(page: Page, timeout: int = 30000) -> str:
     """
     start = time.time()
     poll_interval = 1.0
+    last_log_sec = 0
 
     while (time.time() - start) * 1000 < timeout:
         verdict = _read_verdict(page)
         if verdict in ("accepted", "wrong_answer", "compile_error", "runtime_error", "time_limit"):
             return verdict
+
+        elapsed = int(time.time() - start)
+        if elapsed > 0 and elapsed % 4 == 0 and elapsed != last_log_sec:
+            last_log_sec = elapsed
+            status_text = verdict if verdict else "evaluating"
+            print(f"[act] Still evaluating submission... ({elapsed}s, state: {status_text})")
+
         time.sleep(poll_interval)
 
-    print("[act] Verdict timeout — no definite verdict reached")
+    print("[act] Verdict timeout — no definite verdict reached within time limit")
     return "timeout"
 
 
@@ -384,119 +514,96 @@ def _read_verdict(page: Page) -> str:
     Strictly distinguishes compilation errors, wrong answers, and accepted submissions.
     """
     try:
-        # Step 1: Query DOM for CodeChef's Status line and verdict text
-        text = page.evaluate(r"""() => {
-            // First check for explicit Status block (e.g. "Status : Compilation error", "Status : Correct Answer")
-            const allNodes = document.querySelectorAll('*');
-            for (const el of allNodes) {
-                if (el.children.length <= 2 && el.offsetParent !== null) {
-                    const t = (el.innerText || el.textContent || '').trim();
-                    if (/^Status\s*:\s*[A-Za-z ]+/i.test(t)) {
-                        return t;
+        verdict = page.evaluate(r"""() => {
+            function getCleanText(el) {
+                return (el.innerText || el.textContent || '').trim();
+            }
+
+            // 1. Explicit Status line check (highest priority)
+            // e.g. "Status : Correct Answer", "Status : Compilation error", "Status : Wrong Answer"
+            const allElements = document.querySelectorAll('*');
+            for (const el of allElements) {
+                if (el.offsetParent === null) continue;
+                const text = getCleanText(el);
+                const match = text.match(/Status\s*:\s*([^\n\r]+)/i);
+                if (match) {
+                    const statusVal = match[1].toLowerCase().trim();
+                    if (statusVal.includes('correct answer') || statusVal.includes('accepted')) {
+                        return 'accepted';
+                    }
+                    if (statusVal.includes('compilation error') || statusVal.includes('compile error')) {
+                        return 'compile_error';
+                    }
+                    if (statusVal.includes('wrong answer')) {
+                        return 'wrong_answer';
+                    }
+                    if (statusVal.includes('runtime error') || statusVal.includes('sigsegv')) {
+                        return 'runtime_error';
+                    }
+                    if (statusVal.includes('time limit')) {
+                        return 'time_limit';
+                    }
+                    if (statusVal.includes('running') || statusVal.includes('evaluating') || statusVal.includes('compiling')) {
+                        return 'running';
                     }
                 }
             }
 
-            // Next check output/judge/verdict containers
-            const selectors = [
-                '[class*="verdict"]',
+            // 2. Check dedicated verdict banners / badges / cards
+            const verdictSelectors = [
                 '[class*="submission-status"]',
-                '[class*="judge-output"]',
-                '[class*="output-panel"]',
-                '[class*="console-output"]',
+                '[class*="verdict"]',
+                '[class*="status-badge"]',
                 '[class*="test-result"]',
-                '[class*="status"]',
-                '.judge-output',
-                '.output-panel',
-                '.console-output',
+                '[class*="judge-output"]',
+                '[class*="result-banner"]',
             ];
-            for (const sel of selectors) {
-                const els = document.querySelectorAll(sel);
-                for (const el of els) {
-                    if (el.offsetParent === null) continue;
-                    const t = (el.innerText || el.textContent || '').trim();
-                    if (t.length > 0 && t.length < 3000) {
-                        const lower = t.toLowerCase();
-                        if (lower.includes('compilation error') || lower.includes('fatal error') ||
-                            lower.includes('wrong answer') || lower.includes('correct answer') ||
-                            lower.includes('accepted') || lower.includes('runtime error') ||
-                            lower.includes('time limit') || lower.includes('status :') ||
-                            lower.includes('status:')) {
-                            return t;
+            for (const sel of verdictSelectors) {
+                const nodes = document.querySelectorAll(sel);
+                for (const node of nodes) {
+                    if (node.offsetParent === null) continue;
+                    const t = getCleanText(node).toLowerCase();
+                    if (t.includes('correct answer') || t.includes('all test cases passed') || t === 'accepted') {
+                        if (!t.includes('not accepted') && !t.includes('0/')) {
+                            return 'accepted';
                         }
                     }
+                    if (t.includes('compilation error') || t.includes('fatal error:')) {
+                        return 'compile_error';
+                    }
+                    if (t.includes('wrong answer') || t.includes('test case failed')) {
+                        return 'wrong_answer';
+                    }
+                    if (t.includes('runtime error') || t.includes('sigsegv') || t.includes('nzec')) {
+                        return 'runtime_error';
+                    }
+                    if (t.includes('time limit exceeded')) {
+                        return 'time_limit';
+                    }
                 }
             }
 
-            // Next check compiler/error boxes directly
+            // 3. Check for visible compiler error box
             const errBox = document.querySelector('.error, [class*="error-container"], [class*="errorMessage"]');
             if (errBox && errBox.offsetParent !== null) {
-                const t = (errBox.innerText || errBox.textContent || '').trim();
-                if (t.length > 0) return 'Compilation error: ' + t;
+                const t = getCleanText(errBox).toLowerCase();
+                if (t.includes('fatal error') || t.includes('error:') || t.includes('sol.c:') || t.includes('compilation terminated')) {
+                    return 'compile_error';
+                }
             }
+
+            // 4. Check if currently evaluating/running
+            const isRunning = Array.from(document.querySelectorAll('*')).some(el => {
+                if (el.offsetParent === null) return false;
+                const t = getCleanText(el).toLowerCase();
+                return (t === 'running...' || t === 'evaluating...' || t === 'compiling...' || t === 'judging...' || t === 'submitting...');
+            });
+            if (isRunning) return 'running';
 
             return '';
         }""")
 
-        if not text:
-            return ""
-
-        lower = text.lower()
-
-        # PRIORITY 1: Compilation Errors (e.g. gcc/g++ errors, fatal error, syntax error)
-        if any(w in lower for w in [
-            "compilation error", "compile error", "fatal error:", "fatal error",
-            "compilation terminated", "sol.c:", "sol.cpp:", "sol.py:",
-            "no such file or directory", "undefined reference"
-        ]):
-            return "compile_error"
-
-        # PRIORITY 2: Runtime Errors (e.g. SIGSEGV, NZEC, Exception)
-        if any(w in lower for w in [
-            "runtime error", "sigsegv", "sigfpe", "nzec", "segmentation fault",
-            "traceback (most recent call last)"
-        ]):
-            return "runtime_error"
-
-        # PRIORITY 3: Time Limit Exceeded
-        if any(w in lower for w in [
-            "time limit exceeded", "tle", "timed out"
-        ]):
-            return "time_limit"
-
-        # PRIORITY 4: Wrong Answer & Failed Test Cases
-        # Check explicit failure terms
-        if any(w in lower for w in [
-            "wrong answer", "incorrect", "test case failed", "failed test case",
-            "status : wrong", "did not match expected", "test case 1: failed"
-        ]):
-            return "wrong_answer"
-
-        # Check fractional pass counts: e.g. "0/2 passed", "1/2 test cases passed"
-        import re
-        match_fraction = re.search(r'(\d+)\s*/\s*(\d+)', lower)
-        if match_fraction:
-            passed_cnt = int(match_fraction.group(1))
-            total_cnt = int(match_fraction.group(2))
-            if passed_cnt < total_cnt:
-                return "wrong_answer"
-
-        # PRIORITY 5: Evaluating / Running (in progress)
-        if any(w in lower for w in ["running", "evaluating", "judging", "compiling", "submitting", "pending"]):
-            if not any(w in lower for w in ["correct answer", "accepted"]):
-                return "running"
-
-        # PRIORITY 6: Explicit Accepted / Correct Answer
-        # MUST have explicit confirmation AND zero failure keywords
-        if any(w in lower for w in [
-            "correct answer", "accepted", "all test cases passed", "100% score",
-            "status : correct", "status: correct", "status : accepted"
-        ]):
-            # Safety safeguard: ensure no error words are present
-            if not any(w in lower for w in ["compilation", "error", "wrong", "fail", "incorrect", "fatal"]):
-                return "accepted"
-
-        return ""
+        return verdict or ""
 
     except Exception:
         return ""
