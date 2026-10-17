@@ -181,64 +181,83 @@ def wait_for_login(page, context=None):
             print("  Waiting for login in browser window...")
 
 
-def ensure_logged_in(page, context, start_url: str):
+def setup_user_session(page, context, cli_start_url: str | None = None) -> str:
     """
-    Ensure the user is logged into CodeChef before solving.
-    If not logged in, opens the login page, waits for login,
-    and then navigates to start_url.
+    Implements the user workflow:
+    1. Opens the browser window (login page if not logged in).
+    2. Lets the user manually log in and navigate to their starting problem.
+    3. User presses ENTER in console to fire up Zenith.
     """
-    cookies = context.cookies()
-    has_session = any('codechef.com' in c.get('domain', '') and len(c.get('value', '')) > 15 for c in cookies)
-
-    if has_session:
-        print(f"[main] Checking session on {start_url}...")
-        page.goto(start_url, wait_until="domcontentloaded", timeout=60000)
-        time.sleep(3)
-        if is_logged_in(page, context):
-            print("[auth] CodeChef login session active.")
-            return
-
-    # User is not logged in: navigate to CodeChef login page
-    print("\n" + "=" * 65)
-    print("  [LOGIN REQUIRED] You are not logged into CodeChef.")
-    print("  Opening login page in Chromium...")
-    print("  Please log into your CodeChef account in the browser window.")
-    print("  Zenith will detect your login and start solving automatically.")
-    print("=" * 65 + "\n")
-
-    if "/login" not in page.url.lower():
-        try:
-            page.goto("https://www.codechef.com/login", wait_until="domcontentloaded", timeout=60000)
-            time.sleep(2)
-        except Exception as e:
-            print(f"[auth] Notice opening login page: {e}")
-
     try:
         page.bring_to_front()
     except Exception:
         pass
 
-    # Wait for login to complete
-    logged_in = False
-    dots = 0
-    while not logged_in:
-        time.sleep(2)
-        curr_url = page.url.lower()
-        if "/login" not in curr_url and "/signup" not in curr_url and "/register" not in curr_url:
-            if is_logged_in(page, context) or "codechef.com" in curr_url:
-                logged_in = True
-                break
-        dots += 1
-        if dots % 5 == 0:
-            print("  Waiting for login in browser...")
+    # If CLI explicitly passed a start URL, check login and navigate there directly
+    if cli_start_url:
+        print(f"[main] Navigating to starting URL: {cli_start_url}")
+        try:
+            page.goto(cli_start_url, wait_until="domcontentloaded", timeout=60000)
+            time.sleep(2)
+        except Exception:
+            pass
+        if not is_logged_in(page, context):
+            print("\n[auth] Please log into CodeChef in the open browser...")
+            while not is_logged_in(page, context):
+                time.sleep(2)
+            print("[auth] Login confirmed!")
+            page.goto(cli_start_url, wait_until="domcontentloaded", timeout=60000)
+        return cli_start_url
 
-    print("\n[auth] Login detected! Successfully authenticated.")
-    time.sleep(2)
+    # Check if user is already logged in
+    logged_in = is_logged_in(page, context)
+    curr_url = page.url.lower()
 
-    # Navigate to chosen start URL
-    print(f"[main] Navigating to starting lesson: {start_url}")
-    page.goto(start_url, wait_until="domcontentloaded", timeout=60000)
-    time.sleep(3)
+    if not logged_in:
+        print("\n" + "=" * 65)
+        print("                   Zenith - CodeChef Solver")
+        print("=" * 65)
+        print("  Opening CodeChef login in Chromium...")
+        print("  1. [LOGIN]    Log into your CodeChef account in the browser.")
+        print("  2. [NAVIGATE] Open the problem or course where you want to start.")
+        print("  3. [FIRE UP]  Press [ENTER] here in the console to start solving!")
+        print("=" * 65 + "\n")
+        try:
+            page.goto("https://www.codechef.com/login", wait_until="domcontentloaded", timeout=60000)
+        except Exception:
+            pass
+    else:
+        print("\n" + "=" * 65)
+        print("                   Zenith - CodeChef Solver")
+        print("=" * 65)
+        print("  [SESSION ACTIVE] Logged into CodeChef!")
+        print("  1. [NAVIGATE] In Chromium, open the problem or course to start.")
+        print("  2. [FIRE UP]  Press [ENTER] here in the console to start solving!")
+        print("=" * 65 + "\n")
+        if "codechef.com" not in curr_url or "/login" in curr_url:
+            try:
+                page.goto("https://www.codechef.com/practice", wait_until="domcontentloaded", timeout=60000)
+            except Exception:
+                pass
+
+    # Wait for the user to press Enter to fire up
+    while True:
+        try:
+            input(">> Press [ENTER] once you are on your starting problem to fire up Zenith: ")
+        except (EOFError, KeyboardInterrupt):
+            print("\n[main] Exiting.")
+            sys.exit(0)
+
+        chosen_url = page.url.split("?")[0]
+        if "/login" in chosen_url or "/signup" in chosen_url:
+            print("[main] You are still on the login page! Please log in and open a problem first.")
+            continue
+        if "codechef.com" not in chosen_url:
+            print(f"[main] Browser is on {chosen_url}. Please navigate to CodeChef first.")
+            continue
+
+        print(f"\n[main] Firing up on starting problem: {page.url}\n")
+        return page.url
 
 
 def run_probe(page):
