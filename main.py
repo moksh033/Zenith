@@ -183,12 +183,39 @@ def wait_for_login(page, context=None):
             print("  Waiting for login in browser window...")
 
 
-def setup_user_session(page, context, cli_start_url: str | None = None) -> str:
+def wait_for_user_enter(page, prompt: str = "") -> None:
+    """
+    Wait for the user to press Enter while continuously pumping the Playwright
+    event loop, ensuring new tabs and navigations never hang on about:blank.
+    """
+    import threading
+    user_done = threading.Event()
+
+    def _read_input():
+        try:
+            input(prompt)
+        except (EOFError, KeyboardInterrupt):
+            pass
+        finally:
+            user_done.set()
+
+    t = threading.Thread(target=_read_input, daemon=True)
+    t.start()
+
+    while not user_done.is_set():
+        try:
+            page.wait_for_timeout(200)
+        except Exception:
+            time.sleep(0.2)
+
+
+def setup_user_session(page, context, cli_start_url: str | None = None) -> tuple[any, str]:
     """
     Implements the user workflow:
     1. Opens the browser window (login page if not logged in).
     2. Lets the user manually log in and navigate to their starting problem.
-    3. User presses ENTER in console to fire up Zenith.
+    3. Continuously services the browser event loop so new tabs never freeze on about:blank.
+    4. User presses ENTER in console to fire up Zenith on the active tab.
     """
     try:
         page.bring_to_front()
@@ -206,10 +233,10 @@ def setup_user_session(page, context, cli_start_url: str | None = None) -> str:
         if not is_logged_in(page, context):
             print("\n[auth] Please log into CodeChef in the open browser...")
             while not is_logged_in(page, context):
-                time.sleep(2)
+                page.wait_for_timeout(1000)
             print("[auth] Login confirmed!")
             page.goto(cli_start_url, wait_until="domcontentloaded", timeout=60000)
-        return cli_start_url
+        return page, cli_start_url
 
     # Check if user is already logged in
     logged_in = is_logged_in(page, context)
@@ -242,15 +269,26 @@ def setup_user_session(page, context, cli_start_url: str | None = None) -> str:
             except Exception:
                 pass
 
-    # Wait for the user to press Enter to fire up
+    # Wait for the user to press Enter to fire up, continuously pumping event loop
     while True:
-        try:
-            input(">> Press [ENTER] once you are on your starting problem to fire up Zenith: ")
-        except (EOFError, KeyboardInterrupt):
-            print("\n[main] Exiting.")
-            sys.exit(0)
+        wait_for_user_enter(page, ">> Press [ENTER] once you are on your starting problem to fire up Zenith: ")
 
-        chosen_url = page.url.split("?")[0]
+        # Look for the user's active/focused CodeChef problem page across open tabs
+        active_page = None
+        for p in reversed(context.pages):
+            try:
+                if not p.is_closed():
+                    u = p.url.lower()
+                    if "codechef.com" in u and "/login" not in u and "/signup" not in u:
+                        active_page = p
+                        break
+            except Exception:
+                pass
+
+        if active_page is None:
+            active_page = page
+
+        chosen_url = active_page.url.split("?")[0]
         if "/login" in chosen_url or "/signup" in chosen_url:
             print("[main] You are still on the login page! Please log in and open a problem first.")
             continue
@@ -258,8 +296,13 @@ def setup_user_session(page, context, cli_start_url: str | None = None) -> str:
             print(f"[main] Browser is on {chosen_url}. Please navigate to CodeChef first.")
             continue
 
-        print(f"\n[main] Firing up on starting problem: {page.url}\n")
-        return page.url
+        try:
+            active_page.bring_to_front()
+        except Exception:
+            pass
+
+        print(f"\n[main] Firing up on starting problem: {active_page.url}\n")
+        return active_page, active_page.url
 
 
 def run_probe(page):
@@ -1062,24 +1105,79 @@ def main():
     BROWSER_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
 
     with sync_playwright() as pw:
-        # Launch Playwright Chromium — visible, on top, positioned at screen top-left
-        # slow_mo=100 so every action is visible to the user
+        # Launch Playwright Chromium in natural desktop mode without automation infobars
         browser_context = pw.chromium.launch_persistent_context(
             user_data_dir=str(BROWSER_PROFILE_DIR),
             headless=False,
-            slow_mo=100,
-            viewport={"width": 1300, "height": 800},
+            viewport=None,
+            no_viewport=True,
+            ignore_default_args=["--enable-automation"],
             args=[
                 "--disable-blink-features=AutomationControlled",
                 "--window-position=50,50",
                 "--window-size=1300,800",
+                "--no-first-run",
+                "--no-default-browser-check",
+                "--disable-infobars",
+                "--disable-features=IsolateOrigins,site-per-process",
             ],
         )
+
+        # Context init script to prevent detached blank tabs and neutralize debugger traps
+        browser_context.add_init_script("""
+        // 1. Mask navigator.webdriver
+        try {
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+        } catch (e) {}
+
+        // 2. Prevent links with target="_blank" from opening in detached about:blank tabs
+        window.addEventListener('click', (e) => {
+            const link = e.target.closest('a');
+            if (link && link.target === '_blank') {
+                link.target = '_self';
+            }
+        }, true);
+
+        // 3. Neutralize debugger traps (CodeChef anti-tamper infinite debugger loops)
+        try {
+            const _origFunction = window.Function;
+            window.Function = function(...args) {
+                if (args.length > 0 && typeof args[args.length - 1] === 'string') {
+                    args[args.length - 1] = args[args.length - 1].replace(/\\bdebugger\\b/g, '');
+                }
+                return _origFunction.apply(this, args);
+            };
+            window.Function.prototype = _origFunction.prototype;
+        } catch (e) {}
+
+        try {
+            const _origEval = window.eval;
+            window.eval = function(code) {
+                if (typeof code === 'string' && code.includes('debugger')) {
+                    code = code.replace(/\\bdebugger\\b/g, '');
+                }
+                return _origEval.call(this, code);
+            };
+        } catch (e) {}
+        """)
+
         page = browser_context.pages[0] if browser_context.pages else browser_context.new_page()
 
-        # Close any extra blank tabs Chrome opened, keep only the CodeChef one
+        # Disable debugger pauses via CDP on all pages so tabs never stall on about:blank
+        def _unpause_page(p):
+            try:
+                cdp = p.context.new_cdp_session(p)
+                cdp.send("Debugger.enable")
+                cdp.send("Debugger.setSkipAllPauses", {"skip": True})
+            except Exception:
+                pass
+
+        _unpause_page(page)
+        browser_context.on("page", lambda new_p: _unpause_page(new_p))
+
+        # Close any extra blank tabs Chrome opened, keep only the main one
         for p in browser_context.pages:
-            if p != page:
+            if p != page and p.url == "about:blank":
                 try:
                     p.close()
                 except Exception:
@@ -1092,7 +1190,7 @@ def main():
             pass
 
         # Open browser, verify/wait for login, user navigates to problem, then fires up
-        args.start_url = setup_user_session(page, browser_context, args.start_url)
+        page, args.start_url = setup_user_session(page, browser_context, args.start_url)
 
         print("+----------------------------------------------------------+")
         print("|                          Zenith                          |")
