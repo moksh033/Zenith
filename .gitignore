@@ -25,3 +25,6 @@ env/
 # Release archives
 *.zip
 
+# Helper scripts
+push.bat
+
