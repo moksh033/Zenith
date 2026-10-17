@@ -266,35 +266,9 @@ def write_code(page: Page, code: str) -> bool:
 def detect_code_language(code: str) -> str:
     """
     Detect the programming language of a code snippet.
-    Returns 'C++', 'Python3', 'Java', or 'C'.
-    Defaults to 'C++' for C-family code because C++ compiler on CodeChef
-    compiles C code seamlessly, whereas C compiler fails on C++ code.
+    All code written for this course is strictly C.
     """
-    if not code or not code.strip():
-        return "C++"
-
-    # Python indicators
-    py_indicators = ["def ", "print(", "import sys", "sys.stdin", ":\n", "elif "]
-    if any(ind in code for ind in py_indicators) and "#include" not in code:
-        return "Python3"
-
-    # Java indicators
-    if "public class" in code or "System.out.print" in code or "import java." in code:
-        return "Java"
-
-    # C++ indicators
-    cpp_indicators = [
-        "<iostream>", "<vector>", "<string>", "<algorithm>", "<map>", "<set>",
-        "<bits/stdc++.h>", "using namespace std", "std::", "cout", "cin",
-        "endl", "vector<", "string ", "nullptr", "bool ", "class "
-    ]
-    if any(ind in code for ind in cpp_indicators):
-        return "C++"
-
-    # Default to C++ because on competitive programming platforms like CodeChef,
-    # the C++ compiler safely compiles standard C code (printf, scanf, malloc, etc.)
-    # without compilation errors.
-    return "C++"
+    return "C"
 
 
 def _get_current_language(page: Page) -> str:
@@ -322,19 +296,19 @@ def _get_current_language(page: Page) -> str:
         return ""
 
 
-def set_language(page: Page, language: str = "C++") -> bool:
+def set_language(page: Page, language: str = "C") -> bool:
     """
-    Set the language dropdown to the specified language (e.g. 'C++', 'C', 'Python3', 'Java').
+    Set the language dropdown to the specified language (defaults to 'C').
     Checks first if already set.
     """
     try:
-        lang_target = (language or "C++").strip()
-        if lang_target.lower() in ("cpp", "c++", "c++14", "c++17", "c++20"):
-            target_names = ["C++"]
-            target_values = ["C++"]
-        elif lang_target.lower() in ("c",):
+        lang_target = (language or "C").strip()
+        if lang_target.lower() in ("c",):
             target_names = ["C"]
             target_values = ["C"]
+        elif lang_target.lower() in ("cpp", "c++", "c++14", "c++17", "c++20"):
+            target_names = ["C++"]
+            target_values = ["C++"]
         elif lang_target.lower() in ("python", "python3", "py"):
             target_names = ["Python3", "Python"]
             target_values = ["PYTH 3", "Python3", "PYTHON"]

@@ -326,9 +326,9 @@ def get_next_lesson_url(page: Page, current_url: str, syllabus: list[str]) -> st
 
 def _extract_problem_code(url: str) -> str:
     """Extract the problem code from a CodeChef URL."""
-    match = re.search(r'/problems/([A-Z0-9]+)', url)
+    match = re.search(r'/problems/([^/?#]+)', url)
     if match:
-        return match.group(1)
+        return match.group(1).upper()
     return ""
 
 

@@ -397,13 +397,12 @@ def handle_reading(page, obs):
 
 
 def handle_guided(page, obs):
-    """Handle a guided page: submit existing code, then Next."""
+    """Handle a guided page: submit existing code in C, then Next."""
     url = obs["url"].split("?")[0]
     print(f"[guided] {obs['title'][:60]}")
 
-    # Detect language from current editor code
-    current_code = obs.get("editor_text", "")
-    target_lang = editor.detect_code_language(current_code)
+    # All code in this course is strictly C
+    target_lang = "C"
     print(f"[guided] Code language: {target_lang}")
     editor.set_language(page, target_lang)
 
@@ -424,36 +423,23 @@ def handle_guided(page, obs):
 
     if verdict == "accepted":
         act.jitter_delay(1, 2)
-        if act.click_next(page):
-            progress.mark_lesson(url, "done")
-            return True
         progress.mark_lesson(url, "done")
+        if not act.click_next(page):
+            print("[guided] Click Next didn't advance, advancing via syllabus...")
+            _advance_to_next(page, url, [u for u in progress.get_all_lessons()])
         return True
 
-    # If compilation error and language was C, try C++
-    if verdict == "compile_error" and target_lang == "C":
-        print("[guided] Compilation error in C — switching to C++ and re-submitting...")
-        editor.set_language(page, "C++")
-        time.sleep(1)
-        if act.click_submit(page):
-            verdict = act.wait_for_verdict(page, timeout=30000)
-            print(f"[guided] Re-submit verdict: {verdict}")
-            if verdict == "accepted":
-                act.jitter_delay(1, 2)
-                act.click_next(page)
-                progress.mark_lesson(url, "done")
-                return True
-
-    # Verdict not accepted → try AI repair once
+    # Verdict not accepted → try AI repair in pure C
     if submit_count < MAX_SUBMITS_PER_LESSON:
-        print("[guided] Attempting AI repair with compiler/error feedback...")
+        print("[guided] Attempting AI repair with compiler/error feedback in pure C...")
+        current_code = obs.get("editor_text", "")
         verdict_detail = act.get_verdict_detail(page)
         repaired = solve.repair_solution(
-            obs.get("statement", ""), current_code, verdict_detail, "C++"
+            obs.get("statement", ""), current_code, verdict_detail, "C"
         )
         if repaired:
             if editor.write_code(page, repaired):
-                editor.set_language(page, editor.detect_code_language(repaired))
+                editor.set_language(page, "C")
                 act.jitter_delay()
                 progress.increment_submits(url)
                 if act.click_submit(page):
@@ -461,8 +447,9 @@ def handle_guided(page, obs):
                     print(f"[guided] Repair verdict: {verdict2}")
                     if verdict2 == "accepted":
                         act.jitter_delay(1, 2)
-                        act.click_next(page)
                         progress.mark_lesson(url, "done")
+                        if not act.click_next(page):
+                            _advance_to_next(page, url, [u for u in progress.get_all_lessons()])
                         return True
 
     # All attempts failed — DO NOT skip or click Next
@@ -472,19 +459,19 @@ def handle_guided(page, obs):
 
 
 def handle_exercise(page, obs):
-    """Handle an exercise page: write code, submit, then Next.
+    """Handle an exercise page: write code in pure C, submit, then Next.
     
     Strategy:
-    1. Solution tab code or pre-filled code → submit (auto-detects C++/Python)
-    2. If wrong / CE: AI generates fresh solution (in C++) → submit
-    3. If wrong / CE: AI repairs with error feedback → submit
+    1. Solution tab code (auto-converted to pure C if C++) → submit
+    2. If wrong / CE: AI generates fresh solution in pure C → submit
+    3. If wrong / CE: AI repairs with error feedback in pure C → submit
     """
     url = obs["url"].split("?")[0]
     print(f"[exercise] {obs['title'][:60]}")
     statement = obs.get("statement", "")
 
-    # Attempt 1: Solution tab or existing code
-    code = solve.resolve_code(page, obs, "C++")
+    # Attempt 1: Solution tab or existing code (enforcing pure C)
+    code = solve.resolve_code(page, obs, "C")
     if code:
         result = _submit_code(page, url, obs, code, "solution_tab")
         if result == "accepted":
@@ -492,20 +479,20 @@ def handle_exercise(page, obs):
     else:
         print("[exercise] No code from Solution tab")
 
-    # Attempt 2: Ask AI to generate from scratch
-    print("[exercise] Generating fresh solution with AI...")
+    # Attempt 2: Ask AI to generate from scratch in pure C
+    print("[exercise] Generating fresh solution with AI in pure C...")
     current_code = editor.read_editor(page) or ""
-    ai_code = solve.generate_solution(statement, current_code, "C++")
+    ai_code = solve.generate_solution(statement, current_code, "C")
     if ai_code:
         result = _submit_code(page, url, obs, ai_code, "ai_generate")
         if result == "accepted":
             return True
 
-    # Attempt 3: Repair last submission with error details
-    print("[exercise] Attempting AI repair with compiler/judge output...")
+    # Attempt 3: Repair last submission with error details in pure C
+    print("[exercise] Attempting AI repair with compiler/judge output in pure C...")
     verdict_detail = act.get_verdict_detail(page)
     submitted_code = editor.read_editor(page) or current_code
-    repaired = solve.repair_solution(statement, submitted_code, verdict_detail, "C++")
+    repaired = solve.repair_solution(statement, submitted_code, verdict_detail, "C")
     if repaired:
         result = _submit_code(page, url, obs, repaired, "ai_repair")
         if result == "accepted":
@@ -519,8 +506,8 @@ def handle_exercise(page, obs):
 
 def _submit_code(page, url, obs, code, source):
     """Write code, submit, wait for verdict. Returns 'accepted', 'compile_error', 'wrong_answer', or 'no_submit'."""
-    # Detect code language and set editor dropdown
-    target_lang = editor.detect_code_language(code)
+    # All code in this course is strictly C
+    target_lang = "C"
     print(f"[exercise] Target code language: {target_lang}")
     editor.set_language(page, target_lang)
 
@@ -535,7 +522,7 @@ def _submit_code(page, url, obs, code, source):
             print(f"[exercise] Editor write failed ({source})")
             return "no_submit"
 
-    # Re-verify language
+    # Re-verify language is set to C
     editor.set_language(page, target_lang)
 
     # Submit
@@ -550,23 +537,14 @@ def _submit_code(page, url, obs, code, source):
 
     if verdict == "accepted":
         act.jitter_delay(0.5, 1.5)
-        act.click_next(page)
         progress.mark_lesson(url, "done")
+        advanced = act.click_next(page)
+        if not advanced:
+            print("[exercise] Next button click didn't advance, advancing via syllabus...")
+            act.dismiss_popups(page)
+            time.sleep(1)
+            _advance_to_next(page, url, [u for u in progress.get_all_lessons()])
         return "accepted"
-
-    # If compilation error and language was C, try auto-switching to C++!
-    if verdict == "compile_error" and target_lang == "C":
-        print("[exercise] Compilation error in C — auto-switching to C++ and re-submitting...")
-        editor.set_language(page, "C++")
-        time.sleep(1)
-        if act.click_submit(page):
-            verdict_cpp = act.wait_for_verdict(page, timeout=45000)
-            print(f"[exercise] C++ re-submission verdict: {verdict_cpp}")
-            if verdict_cpp == "accepted":
-                act.jitter_delay(0.5, 1.5)
-                act.click_next(page)
-                progress.mark_lesson(url, "done")
-                return "accepted"
 
     # Strictly do NOT advance or mark as done on failure or timeout!
     return verdict
@@ -640,9 +618,11 @@ def handle_quiz(page, obs):
                 print(f"[quiz] ✓ Option {idx + 1} is CONFIRMED CORRECT! Problem solved.")
                 act.jitter_delay(1.5, 2.5)
                 # Click Next only now, after confirmed correct
-                act.click_next(page)
-                time.sleep(1.5)
                 progress.mark_lesson(url, "done")
+                if not act.click_next(page):
+                    print("[quiz] Click Next didn't advance, advancing via syllabus...")
+                    _advance_to_next(page, url, [u for u in progress.get_all_lessons()])
+                time.sleep(1.0)
                 return True
             elif verdict == "wrong":
                 print(f"[quiz] ✗ Option {idx + 1} was WRONG. Continuing to next option...")
@@ -1042,12 +1022,17 @@ def _advance_to_next(page, current_url: str, lesson_urls: list[str]) -> bool:
     Try to advance to the next lesson in the syllabus.
     Returns True if navigation happened.
     """
+    current_clean = current_url.split("?")[0]
+
     # First try the syllabus order
-    next_url = syllabus.get_next_lesson_url(page, current_url, lesson_urls)
+    next_url = syllabus.get_next_lesson_url(page, current_clean, lesson_urls)
     if next_url:
+        next_clean = next_url.split("?")[0]
         # Skip if already done or blocked
-        while next_url and (progress.is_done(next_url) or progress.is_blocked(next_url)):
-            next_url = syllabus.get_next_lesson_url(page, next_url, lesson_urls)
+        while next_url and (progress.is_done(next_clean) or progress.is_blocked(next_clean)):
+            next_url = syllabus.get_next_lesson_url(page, next_clean, lesson_urls)
+            if next_url:
+                next_clean = next_url.split("?")[0]
 
         if next_url:
             print(f"[advance] → {next_url}")
@@ -1056,9 +1041,9 @@ def _advance_to_next(page, current_url: str, lesson_urls: list[str]) -> bool:
             return True
 
     # Try clicking Next button directly
-    old_url = page.url
+    old_base = page.url.split("?")[0]
     if act.click_next(page):
-        if page.url != old_url:
+        if page.url.split("?")[0] != old_base:
             return True
 
     # Try re-opening the syllabus to find more lessons
@@ -1066,10 +1051,11 @@ def _advance_to_next(page, current_url: str, lesson_urls: list[str]) -> bool:
     if new_urls:
         lesson_urls.clear()
         lesson_urls.extend(new_urls)
-        for url in new_urls:
-            if not progress.is_done(url) and not progress.is_blocked(url):
-                print(f"[advance] Syllabus refresh → {url}")
-                page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        for u in new_urls:
+            u_clean = u.split("?")[0]
+            if not progress.is_done(u_clean) and not progress.is_blocked(u_clean):
+                print(f"[advance] Syllabus refresh → {u}")
+                page.goto(u, wait_until="domcontentloaded", timeout=30000)
                 time.sleep(2)
                 return True
 

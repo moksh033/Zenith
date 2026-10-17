@@ -351,11 +351,13 @@ def _is_button_disabled(page: Page, button_text: str) -> bool:
     """Check if a button with the given text is disabled."""
     try:
         return page.evaluate(f"""(text) => {{
-            const buttons = document.querySelectorAll('button');
+            const buttons = document.querySelectorAll('button, a, [role="button"]');
             for (const b of buttons) {{
-                if (b.textContent.trim() === text) {{
+                const t = (b.textContent || '').trim().toLowerCase();
+                if (t === text.toLowerCase() || t.startsWith(text.toLowerCase())) {{
                     return b.disabled || b.getAttribute('aria-disabled') === 'true'
-                           || b.classList.contains('disabled');
+                           || b.classList.contains('disabled')
+                           || b.classList.contains('Mui-disabled');
                 }}
             }}
             return true;  // Not found = effectively disabled

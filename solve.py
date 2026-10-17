@@ -149,11 +149,64 @@ def get_solution_from_tab(page: Page) -> str:
         return ""
 
 
-def generate_solution(statement: str, current_code: str, language: str = "C++") -> str:
+def is_cpp_code(code: str) -> bool:
+    """Check if code contains C++ specific headers, syntax, or standard libraries."""
+    cpp_markers = [
+        "<iostream>", "<vector>", "<string>", "<algorithm>", "<map>", "<set>",
+        "<bits/stdc++.h>", "using namespace std", "std::", "cout", "cin",
+        "endl", "template<", "class ", "nullptr", "public:", "private:"
+    ]
+    return any(marker in code for marker in cpp_markers)
+
+
+def convert_to_c(cpp_code: str, statement: str = "") -> str:
+    """Convert C++ code into clean, standard C (C99/C11) code."""
+    client = _get_client()
+    if client is None:
+        return cpp_code
+
+    prompt = f"""Convert this C++ program into valid, clean, pure standard C (C99/C11) code.
+
+PROBLEM STATEMENT:
+{statement[:2000]}
+
+C++ CODE:
+{cpp_code[:2000]}
+
+INSTRUCTIONS:
+- Write ONLY pure standard C code.
+- Use #include <stdio.h>, #include <stdlib.h>, #include <string.h>, #include <math.h>, etc.
+- Replace all cin/cout with scanf/printf.
+- Replace vector/string with standard C arrays, char arrays, or malloc pointers.
+- Ensure the code compiles cleanly with gcc (sol.c) with zero warnings/errors.
+- Return ONLY the complete C code. No markdown fences, no explanations.
+"""
+
+    try:
+        model = _get_model()
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": "You are an expert C programmer. Convert C++ code to pure, bug-free C (C99). Return only C code."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.1,
+            max_tokens=2000,
+        )
+        c_code = response.choices[0].message.content.strip()
+        c_code = _strip_fences(c_code)
+        if c_code and len(c_code) > 10:
+            return c_code
+        return cpp_code
+    except Exception as e:
+        print(f"[solve] C++ to C conversion failed: {e}")
+        return cpp_code
+
+
+def generate_solution(statement: str, current_code: str, language: str = "C") -> str:
     """
-    Call AI to generate a complete program.
+    Call AI to generate a complete program in pure C.
     Returns the full program text, or empty string on failure.
-    Defaults to C++ which compiles standard C code with full compatibility.
     """
     client = _get_client()
     if client is None:
@@ -169,10 +222,12 @@ CURRENT EDITOR CODE (may be a skeleton):
 
 INSTRUCTIONS:
 - Return ONLY the complete {language} program, nothing else.
-- No explanations, no markdown fences, no comments about the solution.
-- The program must compile cleanly and pass all test cases.
-- Use standard input/output (cin/cout with ios_base::sync_with_stdio(false) for C++, sys.stdin for Python).
-- If the problem asks to print a specific string, match it exactly (including punctuation and casing).
+- Must be pure {language} (standard C99/C11): use #include <stdio.h>, #include <stdlib.h>, #include <string.h>, etc.
+- DO NOT use any C++ headers or syntax (NO <iostream>, NO cin/cout, NO namespace std, NO class, NO new/delete).
+- Use standard C input/output: scanf, printf, getchar, fgets.
+- Ensure the program compiles cleanly with gcc (sol.c) without warnings or errors.
+- Match exact requested output formatting and casing.
+- No explanations, no markdown fences.
 """
 
     try:
@@ -180,7 +235,7 @@ INSTRUCTIONS:
         response = client.chat.completions.create(
             model=model,
             messages=[
-                {"role": "system", "content": f"You are a competitive programmer. Return only valid, bug-free {language} code. No markdown, no explanations."},
+                {"role": "system", "content": f"You are a competitive programmer writing pure {language} code. Return only valid, bug-free {language} code. No markdown, no explanations."},
                 {"role": "user", "content": prompt},
             ],
             temperature=0.2,
@@ -188,6 +243,9 @@ INSTRUCTIONS:
         )
         code = response.choices[0].message.content.strip()
         code = _strip_fences(code)
+        if language == "C" and is_cpp_code(code):
+            print("[solve] Generated code contained C++ markers — converting to pure C...")
+            code = convert_to_c(code, statement)
         return code
 
     except Exception as e:
@@ -196,16 +254,16 @@ INSTRUCTIONS:
 
 
 def repair_solution(statement: str, submitted_code: str, verdict_text: str,
-                    language: str = "C++") -> str:
+                    language: str = "C") -> str:
     """
     Call AI with the statement, submitted program, and verdict panel text.
-    Returns the repaired program, or empty string on failure.
+    Returns the repaired program in pure C, or empty string on failure.
     """
     client = _get_client()
     if client is None:
         return ""
 
-    prompt = f"""You submitted a {language} program to the CodeChef judge and it was REJECTED.
+    prompt = f"""You submitted a {language} program to the CodeChef judge (gcc sol.c) and it was REJECTED.
 
 PROBLEM STATEMENT:
 {statement[:3000]}
@@ -217,7 +275,8 @@ JUDGE VERDICT / COMPILER / ERROR OUTPUT:
 {verdict_text[:2000]}
 
 Carefully analyze the compiler error or failed test case above.
-Fix the code so it compiles without warnings/errors and passes all test cases.
+Fix the code so it compiles cleanly with gcc without warnings/errors and passes all test cases.
+Must be pure {language} code (use stdio.h, printf, scanf. No C++ headers or features).
 Return ONLY the corrected {language} code. No explanations, no markdown fences.
 """
 
@@ -226,7 +285,7 @@ Return ONLY the corrected {language} code. No explanations, no markdown fences.
         response = client.chat.completions.create(
             model=model,
             messages=[
-                {"role": "system", "content": f"You are a competitive programmer fixing a rejected solution. Return only valid, working {language} code."},
+                {"role": "system", "content": f"You are a competitive programmer fixing a rejected {language} solution. Return only valid, working {language} code."},
                 {"role": "user", "content": prompt},
             ],
             temperature=0.2,
@@ -234,6 +293,9 @@ Return ONLY the corrected {language} code. No explanations, no markdown fences.
         )
         code = response.choices[0].message.content.strip()
         code = _strip_fences(code)
+        if language == "C" and is_cpp_code(code):
+            print("[solve] Repaired code contained C++ markers — converting to pure C...")
+            code = convert_to_c(code, statement)
         return code
 
     except Exception as e:
@@ -389,12 +451,12 @@ code_written: <yes|no>
         return {"layout": "unknown", "code_written": False}
 
 
-def resolve_code(page: Page, obs: dict, language: str = "C++") -> str:
+def resolve_code(page: Page, obs: dict, language: str = "C") -> str:
     """
     Full solver chain for an exercise page:
     1. Check if editor already has a finished program → return it.
-    2. Try the Solution tab → return that code.
-    3. Call xAI → return generated code.
+    2. Try the Solution tab → return that code (auto-converted to C if C++).
+    3. Call AI → return generated pure C code.
     Returns the code to write, or empty string if all fail.
     """
     editor_text = obs.get("editor_text", "")
@@ -406,15 +468,21 @@ def resolve_code(page: Page, obs: dict, language: str = "C++") -> str:
         solution = get_solution_from_tab(page)
         if solution:
             print("[solve] Successfully extracted solution from Solution tab")
+            if is_cpp_code(solution):
+                print("[solve] Solution tab contains C++ code — converting to pure C...")
+                solution = convert_to_c(solution, statement)
             return solution
 
     # 2. Check if editor already has a finished program
     if is_code_written(editor_text, statement):
         print("[solve] Editor already has finished code")
+        if is_cpp_code(editor_text):
+            print("[solve] Editor code is C++ — converting to pure C...")
+            return convert_to_c(editor_text, statement)
         return editor_text
 
     # 3. AI generation fallback
-    print("[solve] Generating solution with AI...")
+    print("[solve] Generating solution with AI in pure C...")
     generated = generate_solution(statement, editor_text, language)
     if generated:
         print("[solve] Got generated solution from AI")

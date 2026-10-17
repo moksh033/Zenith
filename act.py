@@ -199,36 +199,97 @@ def click_next(page: Page, timeout: int = 10000) -> bool:
             print("[act] No Next button found")
             return False
 
-        # Check if disabled
-        is_disabled = False
+        # Helper to check if element is disabled or has disabled class
+        def _is_el_disabled(el) -> bool:
+            try:
+                if el.is_disabled(timeout=300):
+                    return True
+                classes = el.get_attribute("class") or ""
+                if "disabled" in classes.lower() or "mui-disabled" in classes.lower():
+                    return True
+                if (el.get_attribute("aria-disabled") or "").lower() == "true":
+                    return True
+                return False
+            except Exception:
+                return False
+
+        # Wait up to 3 seconds for Next button to become enabled after verdict animation
+        is_disabled = True
+        for _ in range(6):
+            if not _is_el_disabled(next_btn):
+                is_disabled = False
+                break
+            time.sleep(0.5)
+
+        if is_disabled:
+            print("[act] Primary Next button disabled, checking alternative Next elements...")
+            try:
+                alternatives = page.locator('button:has-text("Next"), a:has-text("Next")')
+                for i in range(alternatives.count()):
+                    cand = alternatives.nth(i)
+                    if cand.is_visible(timeout=500) and not _is_el_disabled(cand):
+                        text = (cand.text_content() or "").strip()
+                        if not _is_denied(text) and "prev" not in text.lower():
+                            next_btn = cand
+                            is_disabled = False
+                            break
+            except Exception:
+                pass
+
+        if is_disabled:
+            print("[act] All Next buttons are currently disabled")
+            return False
+
+        # Check if Next button is a link or inside a link with an href
+        href = None
         try:
-            is_disabled = next_btn.is_disabled(timeout=1000)
+            href = next_btn.get_attribute("href")
+            if not href:
+                parent_a = next_btn.locator('xpath=ancestor-or-self::a')
+                if parent_a.count() > 0:
+                    href = parent_a.first.get_attribute("href")
+        except Exception:
+            href = None
+
+        # Dismiss any celebration/streak popups before clicking
+        dismiss_popups(page)
+        try:
+            next_btn.scroll_into_view_if_needed(timeout=1000)
         except Exception:
             pass
 
-        if is_disabled:
-            print("[act] Next button is disabled")
-            return False
-
-        # Click it (with popup retry if intercepted)
+        # Perform click (normal -> force -> DOM dispatch)
         try:
-            next_btn.click(timeout=timeout)
-        except Exception as click_err:
-            if "intercepts pointer events" in str(click_err) or "Timeout" in str(click_err):
-                print("[act] Next button click intercepted by popup, dismissing...")
-                dismiss_popups(page)
+            next_btn.click(timeout=2500)
+        except Exception:
+            dismiss_popups(page)
+            try:
+                next_btn.click(timeout=2500, force=True)
+            except Exception:
                 try:
-                    next_btn.click(timeout=3000)
+                    page.evaluate("el => el.click()", next_btn.element_handle())
                 except Exception:
-                    print("[act] Retrying click with force=True...")
-                    next_btn.click(timeout=3000, force=True)
-            else:
-                raise click_err
-
-        time.sleep(1)
+                    pass
 
         # Wait for page change (SPA navigation)
-        return _wait_for_page_change(page, old_url, old_heading, timeout=15000)
+        changed = _wait_for_page_change(page, old_url, old_heading, timeout=6000)
+        if changed:
+            return True
+
+        # If click did not trigger SPA route change but href is present, navigate directly
+        if href and href.strip() and not href.startswith("#"):
+            try:
+                import urllib.parse
+                target_url = urllib.parse.urljoin(page.url, href)
+                if target_url.split("?")[0] != old_url.split("?")[0]:
+                    print(f"[act] Direct navigation to Next href: {target_url}")
+                    page.goto(target_url, wait_until="domcontentloaded", timeout=20000)
+                    time.sleep(1.5)
+                    return True
+            except Exception as nav_err:
+                print(f"[act] Direct href navigation failed: {nav_err}")
+
+        return False
 
     except Exception as e:
         print(f"[act] Next click failed: {e}")
@@ -624,14 +685,15 @@ def _wait_for_page_change(page: Page, old_url: str, old_heading: str,
                           timeout: int = 15000) -> bool:
     """Wait until the URL or heading changes (SPA navigation)."""
     start = time.time()
+    old_base = old_url.split("?")[0]
     while (time.time() - start) * 1000 < timeout:
-        new_url = page.url
-        if new_url != old_url:
-            time.sleep(0.5)  # Let the page settle
+        new_base = page.url.split("?")[0]
+        if new_base != old_base:
+            time.sleep(1.0)  # Let the page settle
             return True
         new_heading = _get_heading(page)
         if new_heading and new_heading != old_heading:
-            time.sleep(0.5)
+            time.sleep(1.0)
             return True
         time.sleep(0.5)
     return False
