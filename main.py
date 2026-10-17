@@ -396,7 +396,30 @@ def handle_reading(page, obs):
         return False
 
 
-def handle_guided(page, obs):
+def _advance_immediately(page, url: str, lesson_urls: list[str] = None) -> bool:
+    """
+    Advance to the next problem the moment a submission is accepted.
+    Tries Keep Learning -> Next button -> Ctrl+ArrowRight -> syllabus jump.
+    """
+    progress.mark_lesson(url, "done")
+    act.dismiss_popups(page)
+
+    # 1. Module completion button
+    if act.click_keep_learning(page, timeout=1500):
+        return True
+
+    # 2. Next button (DOM click & Ctrl+ArrowRight fallback)
+    if act.click_next(page, timeout=2500):
+        return True
+
+    # 3. Direct syllabus jump
+    print("[main] Advancing immediately via syllabus jump...")
+    act.dismiss_popups(page)
+    all_urls = lesson_urls if lesson_urls else [u for u in progress.get_all_lessons()]
+    return _advance_to_next(page, url, all_urls)
+
+
+def handle_guided(page, obs, lesson_urls: list[str] = None):
     """Handle a guided page: submit existing code in C, then Next."""
     url = obs["url"].split("?")[0]
     print(f"[guided] {obs['title'][:60]}")
@@ -418,19 +441,12 @@ def handle_guided(page, obs):
         return False
 
     print("[guided] Submitted, waiting for verdict...")
-    verdict = act.wait_for_verdict(page, timeout=30000)
+    verdict = act.wait_for_verdict(page, timeout=15000)
     print(f"[guided] Verdict: {verdict}")
 
     if verdict == "accepted":
-        print("[guided] Submission ACCEPTED! Advancing to next problem...")
-        act.jitter_delay(1, 2)
-        progress.mark_lesson(url, "done")
-        advanced = act.click_keep_learning(page, timeout=3000)
-        if not advanced:
-            advanced = act.click_next(page)
-        if not advanced:
-            print("[guided] Click Next didn't advance, advancing via syllabus...")
-            _advance_to_next(page, url, [u for u in progress.get_all_lessons()])
+        print("[guided] Submission ACCEPTED! Moving to next problem immediately...")
+        _advance_immediately(page, url, lesson_urls)
         return True
 
     # Verdict not accepted → try AI repair in pure C
@@ -444,21 +460,13 @@ def handle_guided(page, obs):
         if repaired:
             if editor.write_code(page, repaired):
                 editor.set_language(page, "C")
-                act.jitter_delay()
                 progress.increment_submits(url)
                 if act.click_submit(page):
-                    verdict2 = act.wait_for_verdict(page, timeout=45000)
+                    verdict2 = act.wait_for_verdict(page, timeout=15000)
                     print(f"[guided] Repair verdict: {verdict2}")
                     if verdict2 == "accepted":
-                        print("[guided] Repair submission ACCEPTED! Advancing to next problem...")
-                        act.jitter_delay(1, 2)
-                        progress.mark_lesson(url, "done")
-                        advanced = act.click_keep_learning(page, timeout=3000)
-                        if not advanced:
-                            advanced = act.click_next(page)
-                        if not advanced:
-                            print("[guided] Click Next didn't advance, advancing via syllabus...")
-                            _advance_to_next(page, url, [u for u in progress.get_all_lessons()])
+                        print("[guided] Repair submission ACCEPTED! Moving to next problem immediately...")
+                        _advance_immediately(page, url, lesson_urls)
                         return True
 
     # All attempts failed — DO NOT skip or click Next
@@ -467,7 +475,7 @@ def handle_guided(page, obs):
     return False
 
 
-def handle_exercise(page, obs):
+def handle_exercise(page, obs, lesson_urls: list[str] = None):
     """Handle an exercise page: write code in pure C, submit, then Next.
     
     Strategy:
@@ -482,7 +490,7 @@ def handle_exercise(page, obs):
     # Attempt 1: Solution tab or existing code (enforcing pure C)
     code = solve.resolve_code(page, obs, "C")
     if code:
-        result = _submit_code(page, url, obs, code, "solution_tab")
+        result = _submit_code(page, url, obs, code, "solution_tab", lesson_urls)
         if result == "accepted":
             return True
     else:
@@ -493,7 +501,7 @@ def handle_exercise(page, obs):
     current_code = editor.read_editor(page) or ""
     ai_code = solve.generate_solution(statement, current_code, "C")
     if ai_code:
-        result = _submit_code(page, url, obs, ai_code, "ai_generate")
+        result = _submit_code(page, url, obs, ai_code, "ai_generate", lesson_urls)
         if result == "accepted":
             return True
 
@@ -503,7 +511,7 @@ def handle_exercise(page, obs):
     submitted_code = editor.read_editor(page) or current_code
     repaired = solve.repair_solution(statement, submitted_code, verdict_detail, "C")
     if repaired:
-        result = _submit_code(page, url, obs, repaired, "ai_repair")
+        result = _submit_code(page, url, obs, repaired, "ai_repair", lesson_urls)
         if result == "accepted":
             return True
 
@@ -513,23 +521,18 @@ def handle_exercise(page, obs):
     return False
 
 
-def _submit_code(page, url, obs, code, source):
+def _submit_code(page, url, obs, code, source, lesson_urls: list[str] = None):
     """Write code, submit, wait for verdict. Returns 'accepted', 'compile_error', 'wrong_answer', or 'no_submit'."""
     # All code in this course is strictly C
     target_lang = "C"
     print(f"[exercise] Target code language: {target_lang}")
     editor.set_language(page, target_lang)
 
-    # Write the code
-    if not classify.is_code_written(editor.read_editor(page) or "", obs.get("statement", "")):
-        if not editor.write_code(page, code):
-            print(f"[exercise] Editor write failed ({source})")
-            return "no_submit"
-    elif source != "solution_tab":
-        # Force-write for AI attempts
-        if not editor.write_code(page, code):
-            print(f"[exercise] Editor write failed ({source})")
-            return "no_submit"
+    # Write the code unconditionally into the editor
+    print(f"[exercise] Writing {source} code into editor ({len(code)} chars)...")
+    if not editor.write_code(page, code):
+        print(f"[exercise] Editor write failed ({source})")
+        return "no_submit"
 
     # Re-verify language is set to C
     editor.set_language(page, target_lang)
@@ -541,28 +544,19 @@ def _submit_code(page, url, obs, code, source):
         return "no_submit"
 
     print(f"[exercise] Submitted ({source}), waiting for verdict...")
-    verdict = act.wait_for_verdict(page, timeout=45000)
+    verdict = act.wait_for_verdict(page, timeout=15000)
     print(f"[exercise] Verdict: {verdict}")
 
     if verdict == "accepted":
-        print(f"[exercise] Submission ({source}) ACCEPTED! Advancing to next problem...")
-        act.jitter_delay(0.5, 1.5)
-        progress.mark_lesson(url, "done")
-        advanced = act.click_keep_learning(page, timeout=3000)
-        if not advanced:
-            advanced = act.click_next(page)
-        if not advanced:
-            print("[exercise] Next button click didn't advance, advancing via syllabus...")
-            act.dismiss_popups(page)
-            time.sleep(1)
-            _advance_to_next(page, url, [u for u in progress.get_all_lessons()])
+        print(f"[exercise] Submission ({source}) ACCEPTED! Moving to next problem immediately...")
+        _advance_immediately(page, url, lesson_urls)
         return "accepted"
 
     # Strictly do NOT advance or mark as done on failure or timeout!
     return verdict
 
 
-def handle_quiz(page, obs):
+def handle_quiz(page, obs, lesson_urls: list[str] = None):
     """Handle a quiz page: try options, verify verdict, never skip.
     
     Tries Gemini's pick first (if available), then brute-forces all options.
@@ -611,48 +605,42 @@ def handle_quiz(page, obs):
                 print(f"[quiz] Option {idx + 1} click failed, trying next")
                 continue
 
-            time.sleep(1.0)  # Ensure selection registers in DOM
+            time.sleep(0.15)  # Ensure selection registers in DOM
 
             # Click Submit
             if not act.click_submit(page):
                 print("[quiz] Submit click failed, retrying once...")
-                time.sleep(1.0)
+                time.sleep(0.5)
                 if not act.click_submit(page):
                     print("[quiz] Submit click failed, moving to next option")
                     continue
 
-            # Wait and poll for verdict (up to 8 seconds)
+            # Wait and poll for verdict (rapid polling)
             print(f"[quiz] Waiting for quiz verdict...")
-            verdict = wait_for_quiz_verdict(page, timeout=8.0)
+            verdict = wait_for_quiz_verdict(page, timeout=6.0)
             print(f"[quiz] Verdict for option {idx + 1}: {verdict}")
 
             if verdict == "correct":
-                print(f"[quiz] ✓ Option {idx + 1} is CONFIRMED CORRECT! Problem solved.")
-                act.jitter_delay(1.5, 2.5)
-                # Click Next only now, after confirmed correct
-                progress.mark_lesson(url, "done")
-                if not act.click_next(page):
-                    print("[quiz] Click Next didn't advance, advancing via syllabus...")
-                    _advance_to_next(page, url, [u for u in progress.get_all_lessons()])
-                time.sleep(1.0)
+                print(f"[quiz] Option {idx + 1} is CONFIRMED CORRECT! Moving to next problem immediately...")
+                _advance_immediately(page, url, lesson_urls)
                 return True
             elif verdict == "wrong":
-                print(f"[quiz] ✗ Option {idx + 1} was WRONG. Continuing to next option...")
-                time.sleep(1.0)
+                print(f"[quiz] Option {idx + 1} was WRONG. Continuing to next option...")
+                time.sleep(0.5)
             else:
                 print(f"[quiz] Verdict timed out for option {idx + 1}. Continuing to next option...")
-                time.sleep(1.0)
+                time.sleep(0.5)
 
     # If all passes failed, DO NOT SKIP!
-    print(f"[quiz] ✗ All {num_options} options attempted across {max_passes} passes without confirmed correct answer.")
+    print(f"[quiz] All {num_options} options attempted across {max_passes} passes without confirmed correct answer.")
     print("[quiz] NOT clicking Next — stopping so question is not skipped.")
     progress.mark_lesson(url, "blocked", "all quiz options failed")
     return False
 
 
-def wait_for_quiz_verdict(page, timeout: float = 8.0) -> str:
+def wait_for_quiz_verdict(page, timeout: float = 6.0) -> str:
     """
-    Poll the page for up to `timeout` seconds to determine quiz outcome.
+    Poll the page every 150ms to determine quiz outcome.
     Returns 'correct', 'wrong', or 'timeout'.
     """
     start = time.time()
@@ -660,7 +648,7 @@ def wait_for_quiz_verdict(page, timeout: float = 8.0) -> str:
         v = _check_quiz_verdict(page)
         if v in ("correct", "wrong"):
             return v
-        time.sleep(0.5)
+        time.sleep(0.15)
     return "timeout"
 
 
@@ -985,21 +973,21 @@ def run_lesson_loop(page, lesson_urls: list[str], continue_roadmap: bool = False
                     break
 
         elif layout == "guided":
-            if handle_guided(page, obs):
+            if handle_guided(page, obs, lesson_urls):
                 consecutive_unknown = 0
             else:
                 print(f"[loop] Guided lesson at {url} was not completed. Stopping so question is not skipped.")
                 break
 
         elif layout == "exercise":
-            if handle_exercise(page, obs):
+            if handle_exercise(page, obs, lesson_urls):
                 consecutive_unknown = 0
             else:
                 print(f"[loop] Exercise at {url} was not solved. Stopping so question is not skipped.")
                 break
 
         elif layout == "quiz":
-            if handle_quiz(page, obs):
+            if handle_quiz(page, obs, lesson_urls):
                 consecutive_unknown = 0
             else:
                 print(f"[loop] Quiz at {url} was not completed. Stopping so question is not skipped.")

@@ -473,20 +473,20 @@ def resolve_code(page: Page, obs: dict, language: str = "C") -> str:
                 solution = convert_to_c(solution, statement)
             return solution
 
-    # 2. Check if editor already has a finished program
-    if is_code_written(editor_text, statement):
-        print("[solve] Editor already has finished code")
-        if is_cpp_code(editor_text):
-            print("[solve] Editor code is C++ — converting to pure C...")
-            return convert_to_c(editor_text, statement)
-        return editor_text
-
-    # 3. AI generation fallback
+    # 2. AI generation for current problem statement
     print("[solve] Generating solution with AI in pure C...")
     generated = generate_solution(statement, editor_text, language)
     if generated:
         print("[solve] Got generated solution from AI")
         return generated
+
+    # 3. Fallback: only if AI generation failed, check if editor has existing code
+    if editor_text and len(editor_text.strip()) > 30:
+        print("[solve] Fallback to existing editor code")
+        if is_cpp_code(editor_text):
+            print("[solve] Editor code is C++ — converting to pure C...")
+            return convert_to_c(editor_text, statement)
+        return editor_text
 
     print("[solve] All solver methods failed")
     return ""
