@@ -13,6 +13,8 @@ Adapter behavior:
 5. Set the language dropdown before submit.
 """
 
+from __future__ import annotations
+
 import time
 from playwright.sync_api import Page, TimeoutError as PwTimeout
 

@@ -10,6 +10,8 @@ Usage:
 Loop: observe → classify → act → confirm page changed → record
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import os
@@ -779,7 +781,17 @@ def handle_unknown(page, obs):
 
     print(f"[unknown] Unrecognized layout at {url}")
 
-    # Strategy 1: Try clicking Next or Keep Learning — might just work
+    # Safety safeguard 1: If there's an editor or submit button, treat as exercise/guided
+    if obs.get("has_editor", False) or obs.get("has_submit", False):
+        print("[unknown] Has editor or submit button — treating as exercise")
+        return "exercise"
+
+    # Safety safeguard 2: If there are radio buttons, treat as quiz
+    if obs.get("has_radio_buttons", False):
+        print("[unknown] Has radio buttons — treating as quiz")
+        return "quiz"
+
+    # Strategy 1: Try clicking Next or Keep Learning ONLY if no editor/quiz
     if act.click_next(page):
         time.sleep(1.5)
         new_url = page.url.split("?")[0]
@@ -788,12 +800,7 @@ def handle_unknown(page, obs):
             progress.mark_lesson(url, "done", "advanced from unknown layout")
             return "done"
 
-    # Strategy 2: If there's a Submit button, treat as exercise/guided
-    if obs.get("has_editor", False):
-        print("[unknown] Has editor — treating as exercise")
-        return "exercise"
-
-    # Strategy 3: Vision classification
+    # Strategy 2: Vision classification
     if screenshot and os.path.exists(screenshot):
         dom_summary = classify.get_decision_summary(obs, "unknown")
         result = solve.classify_with_vision(screenshot, dom_summary)
@@ -836,6 +843,7 @@ def run_lesson_loop(page, lesson_urls: list[str], continue_roadmap: bool = False
     observe → classify → act → confirm → record
     """
     consecutive_unknown = 0
+    first_lesson = True
 
     while True:
         # Automatically dismiss any overlay badge/celebration/streak popups
@@ -844,6 +852,13 @@ def run_lesson_loop(page, lesson_urls: list[str], continue_roadmap: bool = False
         url = page.url.split("?")[0]  # Strip query params like ?tab=statement
         print(f"\n{'─' * 60}")
         print(f"[loop] Current URL: {url}")
+
+        # If user explicitly navigated to a previously blocked lesson to retry it, reset it
+        if first_lesson:
+            first_lesson = False
+            if progress.is_blocked(url):
+                print(f"[loop] Starting URL was previously marked blocked ({url}); resetting to retry.")
+                progress.mark_lesson(url, "running")
 
         # Check stuck guards
         action_count = progress.get_action_count(url)

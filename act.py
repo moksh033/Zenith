@@ -5,6 +5,8 @@ Every action clicks through the DOM, never through pixel coordinates.
 Includes the certificate/download denylist so those buttons are never pressed.
 """
 
+from __future__ import annotations
+
 import re
 import time
 import random

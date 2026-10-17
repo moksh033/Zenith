@@ -13,6 +13,8 @@ Verdict repair: if wrong answer / compile error / runtime error, call the
 model once more with the statement, submitted program, and panel text.
 """
 
+from __future__ import annotations
+
 import os
 import re
 import time
@@ -24,10 +26,10 @@ from classify import is_code_written
 OPENROUTER_MODEL = "deepseek/deepseek-chat"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
-GROQ_MODEL = "openai/gpt-oss-120b"
+GROQ_MODEL = "llama-3.3-70b-versatile"
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 
-GEMINI_MODEL = "gemini-3.8-flash"
+GEMINI_MODEL = "gemini-2.5-flash"
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 
 _client = None
@@ -45,7 +47,7 @@ def _get_client():
     from openai import OpenAI
 
     # 1. Prefer OpenRouter (verified active)
-    openrouter_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+    openrouter_key = os.environ.get("OPENROUTER_API_KEY", "").strip('"\' \t\r\n')
     if openrouter_key:
         _client = OpenAI(api_key=openrouter_key, base_url=OPENROUTER_BASE_URL)
         _model_name = OPENROUTER_MODEL
@@ -53,7 +55,7 @@ def _get_client():
         return _client
 
     # 2. Groq fallback (fast inference)
-    groq_key = os.environ.get("GROQ_API_KEY", "").strip()
+    groq_key = os.environ.get("GROQ_API_KEY", "").strip('"\' \t\r\n')
     if groq_key:
         _client = OpenAI(api_key=groq_key, base_url=GROQ_BASE_URL)
         _model_name = GROQ_MODEL
@@ -61,7 +63,7 @@ def _get_client():
         return _client
 
     # 3. Fall back to Gemini
-    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    api_key = os.environ.get("GEMINI_API_KEY", "").strip('"\' \t\r\n')
     if api_key:
         _client = OpenAI(api_key=api_key, base_url=GEMINI_BASE_URL)
         _model_name = GEMINI_MODEL
@@ -424,9 +426,8 @@ def resolve_code(page: Page, obs: dict, language: str = "C++") -> str:
 
 def _strip_fences(code: str) -> str:
     """Remove markdown code fences if present."""
-    # Remove ```c ... ``` or ```C ... ``` or ``` ... ```
-    code = re.sub(r'^```[a-zA-Z]*\s*\n', '', code)
-    code = re.sub(r'\n```\s*$', '', code)
-    code = re.sub(r'^```\s*\n', '', code)
-    code = re.sub(r'\n```$', '', code)
+    code = (code or "").strip()
+    if code.startswith("```"):
+        code = re.sub(r'^```[^\n]*\n', '', code)
+        code = re.sub(r'\n```[^\n]*$', '', code)
     return code.strip()

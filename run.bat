@@ -37,6 +37,18 @@ for /d %%I in ("%ProgramFiles%\Python3*") do (
         goto :PYTHON_FOUND
     )
 )
+for /d %%I in ("%ProgramFiles(x86)%\Python3*") do (
+    if exist "%%I\python.exe" (
+        set "PY_CMD=%%I\python.exe"
+        goto :PYTHON_FOUND
+    )
+)
+for /d %%I in ("C:\Python3*") do (
+    if exist "%%I\python.exe" (
+        set "PY_CMD=%%I\python.exe"
+        goto :PYTHON_FOUND
+    )
+)
 
 :PYTHON_NOT_FOUND
 echo [ERROR] Python is not installed or not configured in your system PATH.
@@ -95,7 +107,7 @@ pause
 
 :ENV_EXISTS
 :: 3. Setup Virtual Environment (isolates packages from global python)
-if not exist ".venv" (
+if not exist ".venv\Scripts\python.exe" (
     echo [INFO] Initializing virtual environment in .venv...
     %PY_CMD% -m venv .venv
 )
@@ -108,7 +120,7 @@ if exist ".venv\Scripts\python.exe" (
 
 :: 4. Install dependencies if needed
 echo [INFO] Ensuring dependencies are installed...
-%RUN_PY% -m pip install -r requirements.txt --quiet
+%RUN_PY% -m pip install -r requirements.txt --quiet --disable-pip-version-check
 %RUN_PY% -m playwright install chromium
 
 echo.

@@ -8,6 +8,8 @@ Every step takes two readings and merges them:
 2. Screenshot: saved under runs/<timestamp>/ for diagnostics.
 """
 
+from __future__ import annotations
+
 import os
 import re
 from datetime import datetime

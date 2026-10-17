@@ -6,6 +6,8 @@ unfinished URL.  Each entry tracks: url, status (done | blocked | running),
 submit count, action count, and an optional note.
 """
 
+from __future__ import annotations
+
 import json
 import os
 from pathlib import Path

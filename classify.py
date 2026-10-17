@@ -18,6 +18,8 @@ Layouts:
     unknown  – None of the above
 """
 
+from __future__ import annotations
+
 import re
 
 
@@ -256,7 +258,7 @@ def classify(obs: dict) -> str:
             return "reading"
 
     # ── Exercise vs Guided ───────────────────────────────────────
-    if has_submit and has_editor:
+    if has_editor or has_submit:
         code_written = is_code_written(editor_text, statement)
 
         # Exercise indicators
