@@ -300,9 +300,10 @@ def wait_for_verdict(page: Page, timeout: int = 30000) -> str:
     """
     Poll the output panel until a definite verdict appears or timeout.
     Returns: 'accepted', 'wrong_answer', 'compile_error', 'runtime_error', 'time_limit', or 'timeout'.
+    NEVER assumes a timeout is accepted.
     """
     start = time.time()
-    poll_interval = 1.5
+    poll_interval = 1.0
 
     while (time.time() - start) * 1000 < timeout:
         verdict = _read_verdict(page)
@@ -310,58 +311,67 @@ def wait_for_verdict(page: Page, timeout: int = 30000) -> str:
             return verdict
         time.sleep(poll_interval)
 
-    # On timeout, check if the Next button is enabled or visible (implicit accept for worked examples)
-    try:
-        next_btn = page.locator('button:text-is("Next"), a:text-is("Next"), button:has-text("Next")')
-        for i in range(next_btn.count()):
-            btn = next_btn.nth(i)
-            if btn.is_visible(timeout=500) and not btn.is_disabled(timeout=500):
-                print("[act] Verdict timeout but Next is enabled — assuming accepted")
-                return "accepted"
-    except Exception:
-        pass
-
-    print("[act] Verdict timeout")
+    print("[act] Verdict timeout — no definite verdict reached")
     return "timeout"
 
 
 def _read_verdict(page: Page) -> str:
-    """Read the current verdict from the output panel."""
+    """
+    Read and parse the current verdict from CodeChef's output/judge panel.
+    Strictly distinguishes compilation errors, wrong answers, and accepted submissions.
+    """
     try:
+        # Step 1: Query DOM for CodeChef's Status line and verdict text
         text = page.evaluate(r"""() => {
+            // First check for explicit Status block (e.g. "Status : Compilation error", "Status : Correct Answer")
+            const allNodes = document.querySelectorAll('*');
+            for (const el of allNodes) {
+                if (el.children.length <= 2 && el.offsetParent !== null) {
+                    const t = (el.innerText || el.textContent || '').trim();
+                    if (/^Status\s*:\s*[A-Za-z ]+/i.test(t)) {
+                        return t;
+                    }
+                }
+            }
+
+            // Next check output/judge/verdict containers
             const selectors = [
-                '.output-panel', '.judge-output', '[class*="output"]',
-                '[class*="verdict"]', '[class*="result"]', '.console-output',
-                '[class*="test-result"]', '[class*="submission-result"]',
-                '[class*="judge"]',
-                '[class*="status"]', '[class*="success"]', '[class*="error"]',
-                '[class*="toast"]', '[class*="alert"]', '[class*="notification"]',
-                '[class*="snackbar"]', '[class*="message"]',
+                '[class*="verdict"]',
+                '[class*="submission-status"]',
+                '[class*="judge-output"]',
+                '[class*="output-panel"]',
+                '[class*="console-output"]',
+                '[class*="test-result"]',
+                '[class*="status"]',
+                '.judge-output',
+                '.output-panel',
+                '.console-output',
             ];
             for (const sel of selectors) {
                 const els = document.querySelectorAll(sel);
                 for (const el of els) {
                     if (el.offsetParent === null) continue;
-                    const t = el.textContent.trim();
-                    if (t.length > 0 && t.length < 2000) {
+                    const t = (el.innerText || el.textContent || '').trim();
+                    if (t.length > 0 && t.length < 3000) {
                         const lower = t.toLowerCase();
-                        if (lower.includes('accepted') || lower.includes('correct') ||
-                            lower.includes('passed') || lower.includes('wrong') ||
-                            lower.includes('error') || lower.includes('running') ||
-                            lower.includes('evaluating') || lower.includes('compil') ||
-                            lower.includes('time limit') || lower.includes('runtime') ||
-                            lower.includes('test case')) {
+                        if (lower.includes('compilation error') || lower.includes('fatal error') ||
+                            lower.includes('wrong answer') || lower.includes('correct answer') ||
+                            lower.includes('accepted') || lower.includes('runtime error') ||
+                            lower.includes('time limit') || lower.includes('status :') ||
+                            lower.includes('status:')) {
                             return t;
                         }
                     }
                 }
             }
-            const body = document.body ? document.body.innerText : '';
-            const last500 = body.slice(-500).toLowerCase();
-            if (last500.includes('accepted') || last500.includes('correct') ||
-                last500.includes('all test cases passed')) {
-                return 'Accepted';
+
+            // Next check compiler/error boxes directly
+            const errBox = document.querySelector('.error, [class*="error-container"], [class*="errorMessage"]');
+            if (errBox && errBox.offsetParent !== null) {
+                const t = (errBox.innerText || errBox.textContent || '').trim();
+                if (t.length > 0) return 'Compilation error: ' + t;
             }
+
             return '';
         }""")
 
@@ -370,24 +380,58 @@ def _read_verdict(page: Page) -> str:
 
         lower = text.lower()
 
-        if any(w in lower for w in ["accepted", "correct", "all test cases passed", "passed"]):
-            if "wrong" not in lower:
-                return "accepted"
-
-        if any(w in lower for w in ["wrong answer", "incorrect"]):
-            return "wrong_answer"
-
-        if any(w in lower for w in ["compilation error", "compile error", "ce"]):
+        # PRIORITY 1: Compilation Errors (e.g. gcc/g++ errors, fatal error, syntax error)
+        if any(w in lower for w in [
+            "compilation error", "compile error", "fatal error:", "fatal error",
+            "compilation terminated", "sol.c:", "sol.cpp:", "sol.py:",
+            "no such file or directory", "undefined reference"
+        ]):
             return "compile_error"
 
-        if any(w in lower for w in ["runtime error", "sigsegv", "sigfpe", "nzec"]):
+        # PRIORITY 2: Runtime Errors (e.g. SIGSEGV, NZEC, Exception)
+        if any(w in lower for w in [
+            "runtime error", "sigsegv", "sigfpe", "nzec", "segmentation fault",
+            "traceback (most recent call last)"
+        ]):
             return "runtime_error"
 
-        if any(w in lower for w in ["time limit", "tle"]):
+        # PRIORITY 3: Time Limit Exceeded
+        if any(w in lower for w in [
+            "time limit exceeded", "tle", "timed out"
+        ]):
             return "time_limit"
 
-        if any(w in lower for w in ["running", "evaluating", "judging", "compiling", "pending"]):
-            return "running"
+        # PRIORITY 4: Wrong Answer & Failed Test Cases
+        # Check explicit failure terms
+        if any(w in lower for w in [
+            "wrong answer", "incorrect", "test case failed", "failed test case",
+            "status : wrong", "did not match expected", "test case 1: failed"
+        ]):
+            return "wrong_answer"
+
+        # Check fractional pass counts: e.g. "0/2 passed", "1/2 test cases passed"
+        import re
+        match_fraction = re.search(r'(\d+)\s*/\s*(\d+)', lower)
+        if match_fraction:
+            passed_cnt = int(match_fraction.group(1))
+            total_cnt = int(match_fraction.group(2))
+            if passed_cnt < total_cnt:
+                return "wrong_answer"
+
+        # PRIORITY 5: Evaluating / Running (in progress)
+        if any(w in lower for w in ["running", "evaluating", "judging", "compiling", "submitting", "pending"]):
+            if not any(w in lower for w in ["correct answer", "accepted"]):
+                return "running"
+
+        # PRIORITY 6: Explicit Accepted / Correct Answer
+        # MUST have explicit confirmation AND zero failure keywords
+        if any(w in lower for w in [
+            "correct answer", "accepted", "all test cases passed", "100% score",
+            "status : correct", "status: correct", "status : accepted"
+        ]):
+            # Safety safeguard: ensure no error words are present
+            if not any(w in lower for w in ["compilation", "error", "wrong", "fail", "incorrect", "fatal"]):
+                return "accepted"
 
         return ""
 
@@ -403,14 +447,20 @@ def get_verdict_detail(page: Page) -> str:
                 '.output-panel', '.judge-output', '[class*="output"]',
                 '[class*="verdict"]', '[class*="result"]', '.console-output',
                 '[class*="test-result"]', '[class*="submission-result"]',
+                '[class*="status"]', '[class*="error"]',
             ];
+            let combined = '';
             for (const sel of selectors) {
-                const el = document.querySelector(sel);
-                if (el && el.textContent.trim().length > 0) {
-                    return el.textContent.trim().substring(0, 2000);
+                const els = document.querySelectorAll(sel);
+                for (const el of els) {
+                    if (el.offsetParent !== null && el.textContent.trim().length > 0) {
+                        combined += '\n' + el.textContent.trim();
+                        if (combined.length > 2500) break;
+                    }
                 }
+                if (combined.length > 2500) break;
             }
-            return '';
+            return combined.substring(0, 2500);
         }""") or ""
     except Exception:
         return ""

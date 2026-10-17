@@ -337,8 +337,11 @@ def handle_guided(page, obs):
     url = obs["url"].split("?")[0]
     print(f"[guided] {obs['title'][:60]}")
 
-    # Confirm language
-    editor.set_language(page, "C")
+    # Detect language from current editor code
+    current_code = obs.get("editor_text", "")
+    target_lang = editor.detect_code_language(current_code)
+    print(f"[guided] Code language: {target_lang}")
+    editor.set_language(page, target_lang)
 
     # Submit existing code
     submit_count = progress.increment_submits(url)
@@ -348,14 +351,11 @@ def handle_guided(page, obs):
         return False
 
     if not act.click_submit(page):
-        print("[guided] Submit click failed, trying Next directly")
-        if act.click_next(page):
-            progress.mark_lesson(url, "done")
-            return True
+        print("[guided] Submit click failed")
         return False
 
     print("[guided] Submitted, waiting for verdict...")
-    verdict = act.wait_for_verdict(page, timeout=15000)
+    verdict = act.wait_for_verdict(page, timeout=30000)
     print(f"[guided] Verdict: {verdict}")
 
     if verdict == "accepted":
@@ -366,31 +366,34 @@ def handle_guided(page, obs):
         progress.mark_lesson(url, "done")
         return True
 
-    # On worked examples, execution might finish without explicit "accepted" text.
-    # Check if Next button can advance the page.
-    print("[guided] Checking if page can advance via Next...")
-    act.jitter_delay(1, 2)
-    if act.click_next(page):
+    # If compilation error and language was C, try C++
+    if verdict == "compile_error" and target_lang == "C":
+        print("[guided] Compilation error in C — switching to C++ and re-submitting...")
+        editor.set_language(page, "C++")
         time.sleep(1)
-        new_url = page.url.split("?")[0]
-        if new_url != url:
-            print("[guided] Page advanced successfully via Next!")
-            progress.mark_lesson(url, "done")
-            return True
+        if act.click_submit(page):
+            verdict = act.wait_for_verdict(page, timeout=30000)
+            print(f"[guided] Re-submit verdict: {verdict}")
+            if verdict == "accepted":
+                act.jitter_delay(1, 2)
+                act.click_next(page)
+                progress.mark_lesson(url, "done")
+                return True
 
-    # Verdict not accepted → try repair once
+    # Verdict not accepted → try AI repair once
     if submit_count < MAX_SUBMITS_PER_LESSON:
-        print("[guided] Attempting repair...")
+        print("[guided] Attempting AI repair with compiler/error feedback...")
         verdict_detail = act.get_verdict_detail(page)
         repaired = solve.repair_solution(
-            obs["statement"], obs["editor_text"], verdict_detail, "C"
+            obs.get("statement", ""), current_code, verdict_detail, "C++"
         )
         if repaired:
             if editor.write_code(page, repaired):
+                editor.set_language(page, editor.detect_code_language(repaired))
                 act.jitter_delay()
                 progress.increment_submits(url)
                 if act.click_submit(page):
-                    verdict2 = act.wait_for_verdict(page, timeout=20000)
+                    verdict2 = act.wait_for_verdict(page, timeout=30000)
                     print(f"[guided] Repair verdict: {verdict2}")
                     if verdict2 == "accepted":
                         act.jitter_delay(1, 2)
@@ -398,8 +401,8 @@ def handle_guided(page, obs):
                         progress.mark_lesson(url, "done")
                         return True
 
-    # All attempts failed
-    print(f"[guided] Could not complete guided lesson at {url}")
+    # All attempts failed — DO NOT skip or click Next
+    print(f"[guided] Could not complete guided lesson at {url}. Halting so question is not skipped.")
     progress.mark_lesson(url, "blocked", f"verdict: {verdict}")
     return False
 
@@ -407,69 +410,71 @@ def handle_guided(page, obs):
 def handle_exercise(page, obs):
     """Handle an exercise page: write code, submit, then Next.
     
-    Strategy (up to 3 attempts):
-    1. Solution tab code or pre-filled code → submit
-    2. If wrong: Gemini generates fresh solution → submit  
-    3. If wrong: Gemini repairs with error feedback → submit
+    Strategy:
+    1. Solution tab code or pre-filled code → submit (auto-detects C++/Python)
+    2. If wrong / CE: AI generates fresh solution (in C++) → submit
+    3. If wrong / CE: AI repairs with error feedback → submit
     """
     url = obs["url"].split("?")[0]
     print(f"[exercise] {obs['title'][:60]}")
-
     statement = obs.get("statement", "")
 
     # Attempt 1: Solution tab or existing code
-    code = solve.resolve_code(page, obs, "C")
+    code = solve.resolve_code(page, obs, "C++")
     if code:
         result = _submit_code(page, url, obs, code, "solution_tab")
         if result == "accepted":
             return True
-        if result == "no_submit":
-            # Submit button failed — try Gemini
-            pass
     else:
         print("[exercise] No code from Solution tab")
 
-    # Attempt 2: Ask Gemini to generate from scratch
-    print("[exercise] Generating fresh solution with Gemini...")
+    # Attempt 2: Ask AI to generate from scratch
+    print("[exercise] Generating fresh solution with AI...")
     current_code = editor.read_editor(page) or ""
-    gemini_code = solve.generate_solution(statement, current_code, "C")
-    if gemini_code:
-        result = _submit_code(page, url, obs, gemini_code, "gemini_generate")
+    ai_code = solve.generate_solution(statement, current_code, "C++")
+    if ai_code:
+        result = _submit_code(page, url, obs, ai_code, "ai_generate")
         if result == "accepted":
             return True
 
     # Attempt 3: Repair last submission with error details
-    print("[exercise] Attempting Gemini repair...")
+    print("[exercise] Attempting AI repair with compiler/judge output...")
     verdict_detail = act.get_verdict_detail(page)
     submitted_code = editor.read_editor(page) or current_code
-    repaired = solve.repair_solution(statement, submitted_code, verdict_detail, "C")
+    repaired = solve.repair_solution(statement, submitted_code, verdict_detail, "C++")
     if repaired:
-        result = _submit_code(page, url, obs, repaired, "gemini_repair")
+        result = _submit_code(page, url, obs, repaired, "ai_repair")
         if result == "accepted":
             return True
 
-    # All 3 attempts failed — DO NOT skip or click Next
-    print("[exercise] All attempts failed — staying on page, not skipping to next problem.")
+    # All attempts failed — DO NOT skip or click Next
+    print(f"[exercise] All attempts failed for {url}. Halting so problem is NOT skipped.")
     progress.mark_lesson(url, "blocked", "all attempts failed")
     return False
 
 
 def _submit_code(page, url, obs, code, source):
-    """Write code, submit, wait for verdict. Returns 'accepted', 'wrong', or 'no_submit'."""
+    """Write code, submit, wait for verdict. Returns 'accepted', 'compile_error', 'wrong_answer', or 'no_submit'."""
+    # Detect code language and set editor dropdown
+    target_lang = editor.detect_code_language(code)
+    print(f"[exercise] Target code language: {target_lang}")
+    editor.set_language(page, target_lang)
+
     # Write the code
     if not classify.is_code_written(editor.read_editor(page) or "", obs.get("statement", "")):
         if not editor.write_code(page, code):
             print(f"[exercise] Editor write failed ({source})")
             return "no_submit"
     elif source != "solution_tab":
-        # Force-write for Gemini attempts
+        # Force-write for AI attempts
         if not editor.write_code(page, code):
             print(f"[exercise] Editor write failed ({source})")
             return "no_submit"
 
-    editor.set_language(page, "C")
+    # Re-verify language
+    editor.set_language(page, target_lang)
 
-    # Submit immediately
+    # Submit
     progress.increment_submits(url)
     if not act.click_submit(page):
         print(f"[exercise] Submit click failed ({source})")
@@ -485,17 +490,22 @@ def _submit_code(page, url, obs, code, source):
         progress.mark_lesson(url, "done")
         return "accepted"
 
-    if verdict == "timeout":
-        # Check if Next button is available (implicit accept)
+    # If compilation error and language was C, try auto-switching to C++!
+    if verdict == "compile_error" and target_lang == "C":
+        print("[exercise] Compilation error in C — auto-switching to C++ and re-submitting...")
+        editor.set_language(page, "C++")
         time.sleep(1)
-        if act.click_next(page):
-            new_url = page.url.split("?")[0]
-            if new_url != url:
-                print("[exercise] Page changed after timeout — treating as accepted")
+        if act.click_submit(page):
+            verdict_cpp = act.wait_for_verdict(page, timeout=45000)
+            print(f"[exercise] C++ re-submission verdict: {verdict_cpp}")
+            if verdict_cpp == "accepted":
+                act.jitter_delay(0.5, 1.5)
+                act.click_next(page)
                 progress.mark_lesson(url, "done")
                 return "accepted"
 
-    return "wrong"
+    # Strictly do NOT advance or mark as done on failure or timeout!
+    return verdict
 
 
 def handle_quiz(page, obs):
@@ -1015,21 +1025,11 @@ def main():
         except Exception:
             sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 
-    # Determine starting URL (prompts interactively if not passed via CLI)
-    args.start_url = get_starting_url(args.start_url)
-
-    print("+----------------------------------------------------------+")
-    print("|           CodeChef Course Runner                         |")
-    print("+----------------------------------------------------------+")
-    print(f"  Start URL: {args.start_url}")
-    print(f"  Mode:      {'probe' if args.probe else 'dry-run' if args.dry_run else 'roadmap' if args.roadmap else 'single course'}")
-    print()
-
     BROWSER_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
 
     with sync_playwright() as pw:
         # Launch Playwright Chromium — visible, on top, positioned at screen top-left
-        # slow_mo=500 so every action is visible to the user
+        # slow_mo=100 so every action is visible to the user
         browser_context = pw.chromium.launch_persistent_context(
             user_data_dir=str(BROWSER_PROFILE_DIR),
             headless=False,
@@ -1057,8 +1057,15 @@ def main():
         except Exception:
             pass
 
-        # Verify login and navigate to starting lesson
-        ensure_logged_in(page, browser_context, args.start_url)
+        # Open browser, verify/wait for login, user navigates to problem, then fires up
+        args.start_url = setup_user_session(page, browser_context, args.start_url)
+
+        print("+----------------------------------------------------------+")
+        print("|                          Zenith                          |")
+        print("+----------------------------------------------------------+")
+        print(f"  Start URL: {args.start_url}")
+        print(f"  Mode:      {'probe' if args.probe else 'dry-run' if args.dry_run else 'roadmap' if args.roadmap else 'single course'}")
+        print()
 
         # ── Probe mode ───────────────────────────────────────────
         if args.probe:

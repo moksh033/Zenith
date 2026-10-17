@@ -20,7 +20,8 @@ If you downloaded `Zenith-v1.1.0.zip` from Releases:
 2. Double-click `run.bat` (if Python is missing, it will offer to auto-install it via `winget`).
 3. On first launch, `.env` will open in Notepad. Paste your API key (Groq, OpenRouter, or Gemini) and save.
 4. Log into your CodeChef account in the browser window that opens.
-5. The runner detects your login and starts solving automatically.
+5. In Chromium, navigate directly to the course or problem you want to start on.
+6. Press [ENTER] in the console window to fire up Zenith!
 
 ## Quick Start (From Source)
 

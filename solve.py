@@ -98,24 +98,25 @@ def get_solution_from_tab(page: Page) -> str:
         # Extract code from the solution tab content
         code = page.evaluate("""() => {
             // Look for code blocks in the solution panel
-            const codeBlocks = document.querySelectorAll('pre code, code, .solution-code, [class*="solution"] pre');
+            const codeBlocks = document.querySelectorAll('pre code, code, .solution-code, [class*="solution"] pre, [class*="Solution"] pre');
             let bestCode = '';
             for (const block of codeBlocks) {
-                const text = block.textContent || '';
-                // Prefer blocks that look like C programs
-                if (text.includes('#include') || text.includes('int main')) {
+                const text = (block.textContent || '').trim();
+                // Prefer blocks that look like complete programs
+                if (text.includes('#include') || text.includes('int main') ||
+                    text.includes('def ') || text.includes('import ') ||
+                    text.includes('class ') || text.includes('public static void main')) {
                     if (text.length > bestCode.length) bestCode = text;
                 }
             }
             if (bestCode) return bestCode;
 
-            // Fallback: look for any code-like content in the solution area
+            // Fallback: look for any preformatted content in the solution area
             const solutionArea = document.querySelector('[class*="solution"], [class*="Solution"]');
             if (solutionArea) {
                 const pre = solutionArea.querySelector('pre');
-                if (pre) return pre.textContent || '';
-                // Try to find fenced code in markdown
-                const text = solutionArea.textContent || '';
+                if (pre) return (pre.textContent || '').trim();
+                const text = (solutionArea.textContent || '').trim();
                 return text;
             }
             return '';
@@ -130,7 +131,7 @@ def get_solution_from_tab(page: Page) -> str:
         except Exception:
             pass
 
-        if code and ("#include" in code or "int main" in code):
+        if code and len(code.strip()) > 10:
             return code.strip()
 
         return ""
@@ -146,16 +147,17 @@ def get_solution_from_tab(page: Page) -> str:
         return ""
 
 
-def generate_solution(statement: str, current_code: str, language: str = "C") -> str:
+def generate_solution(statement: str, current_code: str, language: str = "C++") -> str:
     """
-    Call Gemini to generate a complete program.
+    Call AI to generate a complete program.
     Returns the full program text, or empty string on failure.
+    Defaults to C++ which compiles standard C code with full compatibility.
     """
     client = _get_client()
     if client is None:
         return ""
 
-    prompt = f"""You are solving a CodeChef programming problem. Write a complete, working {language} program.
+    prompt = f"""You are solving a CodeChef competitive programming problem. Write a complete, working {language} program.
 
 PROBLEM STATEMENT:
 {statement[:3000]}
@@ -166,8 +168,8 @@ CURRENT EDITOR CODE (may be a skeleton):
 INSTRUCTIONS:
 - Return ONLY the complete {language} program, nothing else.
 - No explanations, no markdown fences, no comments about the solution.
-- The program must compile and produce the correct output.
-- Use standard input/output as needed.
+- The program must compile cleanly and pass all test cases.
+- Use standard input/output (cin/cout with ios_base::sync_with_stdio(false) for C++, sys.stdin for Python).
 - If the problem asks to print a specific string, match it exactly (including punctuation and casing).
 """
 
@@ -176,14 +178,13 @@ INSTRUCTIONS:
         response = client.chat.completions.create(
             model=model,
             messages=[
-                {"role": "system", "content": f"You are a competitive programmer. Return only valid {language} code. No markdown, no explanations."},
+                {"role": "system", "content": f"You are a competitive programmer. Return only valid, bug-free {language} code. No markdown, no explanations."},
                 {"role": "user", "content": prompt},
             ],
             temperature=0.2,
             max_tokens=2000,
         )
         code = response.choices[0].message.content.strip()
-        # Strip markdown fences if present
         code = _strip_fences(code)
         return code
 
@@ -193,7 +194,7 @@ INSTRUCTIONS:
 
 
 def repair_solution(statement: str, submitted_code: str, verdict_text: str,
-                    language: str = "C") -> str:
+                    language: str = "C++") -> str:
     """
     Call AI with the statement, submitted program, and verdict panel text.
     Returns the repaired program, or empty string on failure.
@@ -202,7 +203,7 @@ def repair_solution(statement: str, submitted_code: str, verdict_text: str,
     if client is None:
         return ""
 
-    prompt = f"""You submitted a {language} program to a CodeChef judge and it was REJECTED.
+    prompt = f"""You submitted a {language} program to the CodeChef judge and it was REJECTED.
 
 PROBLEM STATEMENT:
 {statement[:3000]}
@@ -210,10 +211,12 @@ PROBLEM STATEMENT:
 SUBMITTED CODE:
 {submitted_code[:2000]}
 
-JUDGE VERDICT / OUTPUT:
-{verdict_text[:1500]}
+JUDGE VERDICT / COMPILER / ERROR OUTPUT:
+{verdict_text[:2000]}
 
-Fix the program. Return ONLY the corrected {language} code. No explanations, no markdown fences.
+Carefully analyze the compiler error or failed test case above.
+Fix the code so it compiles without warnings/errors and passes all test cases.
+Return ONLY the corrected {language} code. No explanations, no markdown fences.
 """
 
     try:
@@ -221,10 +224,10 @@ Fix the program. Return ONLY the corrected {language} code. No explanations, no 
         response = client.chat.completions.create(
             model=model,
             messages=[
-                {"role": "system", "content": f"You are a competitive programmer fixing a rejected solution. Return only valid {language} code."},
+                {"role": "system", "content": f"You are a competitive programmer fixing a rejected solution. Return only valid, working {language} code."},
                 {"role": "user", "content": prompt},
             ],
-            temperature=0.3,
+            temperature=0.2,
             max_tokens=2000,
         )
         code = response.choices[0].message.content.strip()
@@ -384,7 +387,7 @@ code_written: <yes|no>
         return {"layout": "unknown", "code_written": False}
 
 
-def resolve_code(page: Page, obs: dict, language: str = "C") -> str:
+def resolve_code(page: Page, obs: dict, language: str = "C++") -> str:
     """
     Full solver chain for an exercise page:
     1. Check if editor already has a finished program → return it.

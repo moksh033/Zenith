@@ -261,37 +261,144 @@ def write_code(page: Page, code: str) -> bool:
     return False
 
 
-def set_language(page: Page, language: str = "C") -> bool:
+def detect_code_language(code: str) -> str:
     """
-    Set the language dropdown to the specified language.
-    Checks first if already set (takes < 5ms).
+    Detect the programming language of a code snippet.
+    Returns 'C++', 'Python3', 'Java', or 'C'.
+    Defaults to 'C++' for C-family code because C++ compiler on CodeChef
+    compiles C code seamlessly, whereas C compiler fails on C++ code.
+    """
+    if not code or not code.strip():
+        return "C++"
+
+    # Python indicators
+    py_indicators = ["def ", "print(", "import sys", "sys.stdin", ":\n", "elif "]
+    if any(ind in code for ind in py_indicators) and "#include" not in code:
+        return "Python3"
+
+    # Java indicators
+    if "public class" in code or "System.out.print" in code or "import java." in code:
+        return "Java"
+
+    # C++ indicators
+    cpp_indicators = [
+        "<iostream>", "<vector>", "<string>", "<algorithm>", "<map>", "<set>",
+        "<bits/stdc++.h>", "using namespace std", "std::", "cout", "cin",
+        "endl", "vector<", "string ", "nullptr", "bool ", "class "
+    ]
+    if any(ind in code for ind in cpp_indicators):
+        return "C++"
+
+    # Default to C++ because on competitive programming platforms like CodeChef,
+    # the C++ compiler safely compiles standard C code (printf, scanf, malloc, etc.)
+    # without compilation errors.
+    return "C++"
+
+
+def _get_current_language(page: Page) -> str:
+    """Get the currently selected language from CodeChef's editor header."""
+    try:
+        return page.evaluate("""() => {
+            // Check CodeChef's MUI combobox (id="language-select")
+            const sel = document.querySelector('#language-select');
+            if (sel) {
+                return (sel.innerText || sel.textContent || '').trim();
+            }
+            // Check native <select>
+            const nativeSel = document.querySelector('select[class*="lang"], select[id*="lang"]');
+            if (nativeSel) return nativeSel.value || nativeSel.options[nativeSel.selectedIndex]?.text || '';
+
+            // Check header buttons
+            const btns = document.querySelectorAll('button, [class*="lang"], [class*="select"]');
+            for (const b of btns) {
+                const t = b.textContent.trim();
+                if (['C', 'C++', 'Python', 'Python3', 'Java'].includes(t)) return t;
+            }
+            return '';
+        }""") or ""
+    except Exception:
+        return ""
+
+
+def set_language(page: Page, language: str = "C++") -> bool:
+    """
+    Set the language dropdown to the specified language (e.g. 'C++', 'C', 'Python3', 'Java').
+    Checks first if already set.
     """
     try:
-        # Step 0: Check FIRST if language is already set!
-        current = _get_current_language(page)
-        if current.upper() == language.upper():
-            return True
+        lang_target = (language or "C++").strip()
+        if lang_target.lower() in ("cpp", "c++", "c++14", "c++17", "c++20"):
+            target_names = ["C++"]
+            target_values = ["C++"]
+        elif lang_target.lower() in ("c",):
+            target_names = ["C"]
+            target_values = ["C"]
+        elif lang_target.lower() in ("python", "python3", "py"):
+            target_names = ["Python3", "Python"]
+            target_values = ["PYTH 3", "Python3", "PYTHON"]
+        elif lang_target.lower() in ("java",):
+            target_names = ["Java"]
+            target_values = ["JAVA"]
+        else:
+            target_names = [lang_target]
+            target_values = [lang_target]
 
-        # Custom dropdown pattern on CodeChef (button in editor header)
+        # Step 0: Check if language is already set
+        current = _get_current_language(page)
+        for tn in target_names:
+            if current.upper() == tn.upper():
+                return True
+
+        # Step 1: CodeChef Material-UI Select (id="language-select")
+        try:
+            sel = page.locator('#language-select')
+            if sel.count() > 0 and sel.first.is_visible(timeout=1000):
+                sel.first.click(timeout=1500)
+                time.sleep(0.3)
+                for val in target_values:
+                    opt = page.locator(f'li[data-value="{val}"]').first
+                    if opt.count() > 0 and opt.is_visible(timeout=500):
+                        opt.click(timeout=1000)
+                        time.sleep(0.3)
+                        print(f"[editor] Language set to {val}")
+                        return True
+                for tn in target_names:
+                    opt = page.locator(f'li[role="option"]:has-text("{tn}")').first
+                    if opt.count() > 0 and opt.is_visible(timeout=500):
+                        opt.click(timeout=1000)
+                        time.sleep(0.3)
+                        print(f"[editor] Language set to {tn}")
+                        return True
+                # Close listbox if not matched
+                try:
+                    page.keyboard.press("Escape")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # Step 2: Custom dropdown buttons / generic selectors
         dropdown_selectors = [
-            'button:has-text("C")',
             '[class*="language"] button',
             '[class*="lang-dropdown"]',
+            'button:has-text("C")',
         ]
-        for sel in dropdown_selectors:
+        for sel_name in dropdown_selectors:
             try:
-                el = page.locator(sel)
+                el = page.locator(sel_name)
                 if el.count() > 0 and el.first.is_visible(timeout=500):
                     text = (el.first.text_content() or "").strip()
-                    if text.upper() == language.upper():
-                        return True
+                    for tn in target_names:
+                        if text.upper() == tn.upper():
+                            return True
                     el.first.click(timeout=1000)
                     time.sleep(0.2)
-                    option = page.locator(f'text="{language}"').first
-                    if option.is_visible(timeout=1000):
-                        option.click(timeout=1000)
-                        time.sleep(0.2)
-                        return True
+                    for tn in target_names:
+                        option = page.locator(f'text="{tn}"').first
+                        if option.is_visible(timeout=500):
+                            option.click(timeout=500)
+                            time.sleep(0.2)
+                            return True
             except Exception:
                 continue
 
@@ -300,24 +407,6 @@ def set_language(page: Page, language: str = "C") -> bool:
     except Exception as e:
         print(f"[editor] Failed to set language: {e}")
         return False
-
-
-def _get_current_language(page: Page) -> str:
-    """Get the currently selected language."""
-    try:
-        return page.evaluate("""() => {
-            // Check dropdown buttons in editor header
-            const btns = document.querySelectorAll('button, [class*="lang"], [class*="select"]');
-            for (const b of btns) {
-                const t = b.textContent.trim();
-                if (['C', 'C++', 'Python', 'Java'].includes(t)) return t;
-            }
-            const sel = document.querySelector('select[class*="lang"], select[id*="lang"]');
-            if (sel) return sel.value || '';
-            return '';
-        }""") or ""
-    except Exception:
-        return ""
 
 
 def _is_submit_disabled(page: Page) -> bool:
