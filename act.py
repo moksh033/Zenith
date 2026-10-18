@@ -478,7 +478,21 @@ def is_accepted_on_screen(page: Page) -> bool:
     """
     try:
         return page.evaluate(r"""() => {
-            const body = (document.body ? document.body.innerText : '').toLowerCase();
+            let texts = [];
+            if (document.body) texts.push(document.body.innerText || '');
+            
+            // Explicitly include all output panels, alert cards, banners, and badges
+            const panels = document.querySelectorAll(
+                '.output-panel, .judge-output, [class*="output"], [class*="result"], ' +
+                '[class*="verdict"], [class*="test-result"], [class*="alert"], [class*="banner"], ' +
+                '[class*="feedback"], [class*="card"], [class*="message"], [class*="success"]'
+            );
+            for (const p of panels) {
+                texts.push(p.innerText || p.textContent || '');
+            }
+
+            const fullText = texts.join(' ').toLowerCase();
+
             const successWords = [
                 "awesome, you nailed it",
                 "awesome",
@@ -493,52 +507,158 @@ def is_accepted_on_screen(page: Page) -> bool:
                 "passed all test cases",
                 "100% score",
                 "great job",
+                "good job",
+                "nice job",
                 "congratulations",
                 "keep learning",
                 "next module",
-                "continue learning"
+                "continue learning",
+                "accepted",
+                "solved"
             ];
-            const hasSuccess = successWords.some(w => body.includes(w));
-            const hasWrong = (
-                body.includes("wrong answer: failed on a hidden test case") ||
-                body.includes("failed on a hidden test case") ||
-                body.includes("compilation error") ||
-                body.includes("fatal error:")
-            );
-            return hasSuccess && !hasWrong;
+
+            const failureWords = [
+                "wrong answer: failed on a hidden test case",
+                "failed on a hidden test case",
+                "wrong answer",
+                "test case failed",
+                "find error",
+                "compilation error",
+                "compile error",
+                "fatal error:",
+                "sol.c:",
+                "compilation terminated",
+                "runtime error",
+                "sigsegv",
+                "time limit exceeded"
+            ];
+
+            const hasSuccess = successWords.some(w => fullText.includes(w));
+            if (!hasSuccess) return false;
+
+            const hasFailure = failureWords.some(w => fullText.includes(w));
+            return hasSuccess && !hasFailure;
         }""")
     except Exception:
         return False
 
 
-def wait_for_verdict(page: Page, timeout: int = 15000) -> str:
+def _read_failure_on_screen(page: Page) -> str:
+    """Check if the screen displays an explicit failure (wrong answer, CE, RE, TLE)."""
+    try:
+        return page.evaluate(r"""() => {
+            const body = (document.body ? document.body.innerText : '').toLowerCase();
+
+            // Find Error button is unambiguous Wrong Answer on CodeChef Learn
+            const buttons = Array.from(document.querySelectorAll('button, a, [role="button"]'));
+            if (buttons.some(b => (b.textContent || '').toLowerCase().includes('find error'))) {
+                return 'wrong_answer';
+            }
+
+            if (body.includes('wrong answer') || body.includes('failed on a hidden test case') || body.includes('test case failed')) {
+                return 'wrong_answer';
+            }
+            if (body.includes('compilation error') || body.includes('compile error') || body.includes('fatal error:') || body.includes('sol.c:')) {
+                return 'compile_error';
+            }
+            if (body.includes('runtime error') || body.includes('sigsegv') || body.includes('nzec')) {
+                return 'runtime_error';
+            }
+            if (body.includes('time limit exceeded')) {
+                return 'time_limit';
+            }
+            return '';
+        }""") or ""
+    except Exception:
+        return ""
+
+
+def _is_evaluating_on_screen(page: Page) -> bool:
+    """Check if the page is currently actively evaluating or compiling."""
+    try:
+        return page.evaluate("""() => {
+            const body = (document.body ? document.body.innerText : '').toLowerCase();
+            return (
+                body.includes('evaluating...') ||
+                body.includes('submitting...') ||
+                body.includes('judging...') ||
+                body.includes('compiling...')
+            );
+        }""")
+    except Exception:
+        return False
+
+
+def _is_next_button_active(page: Page) -> bool:
+    """Check if the Next button is currently visible and not disabled."""
+    try:
+        return page.evaluate("""() => {
+            const btns = Array.from(document.querySelectorAll('button, a, [role="button"]'));
+            const nextBtn = btns.find(b => {
+                const t = (b.innerText || b.textContent || '').trim().toLowerCase();
+                return t === 'next' || t === 'next >';
+            });
+            if (!nextBtn) return false;
+            if (nextBtn.disabled || nextBtn.getAttribute('aria-disabled') === 'true') return false;
+            const style = window.getComputedStyle(nextBtn);
+            if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+            return true;
+        }""")
+    except Exception:
+        return False
+
+
+def _get_output_text(page: Page) -> str:
+    """Get text from the output panel."""
+    try:
+        return page.evaluate("""() => {
+            const el = document.querySelector('.output-panel, .judge-output, [class*="output"], [class*="result"]');
+            return el ? (el.innerText || el.textContent || '').trim() : '';
+        }""") or ""
+    except Exception:
+        return ""
+
+
+def wait_for_verdict(page: Page, timeout: int = 10000) -> str:
     """
-    Rapid-poll the page every 150ms until a definite verdict appears or timeout.
-    Returns: 'accepted', 'wrong_answer', 'compile_error', 'runtime_error', 'time_limit', or 'timeout'.
-    NEVER assumes a timeout is accepted.
+    Rapid-poll the screen every 100ms for success or failure keywords.
+    The moment a success keyword appears (e.g. 'Awesome, you nailed it', 'Hooray', 'Well done'),
+    returns 'accepted' immediately.
     """
     start = time.time()
-    poll_interval = 0.15  # 150ms for instant feedback
-    last_log_sec = 0
+    poll_interval = 0.1  # 100ms rapid polling
 
     while (time.time() - start) * 1000 < timeout:
-        verdict = _read_verdict(page)
-        if verdict in ("accepted", "wrong_answer", "compile_error", "runtime_error", "time_limit"):
+        # 1. Check success keywords
+        if is_accepted_on_screen(page):
             elapsed_ms = int((time.time() - start) * 1000)
-            print(f"[act] Verdict '{verdict}' detected in {elapsed_ms}ms")
-            return verdict
+            print(f"[act] Success keyword detected on screen in {elapsed_ms}ms! Problem accepted.")
+            return "accepted"
 
-        elapsed = int(time.time() - start)
-        if elapsed > 0 and elapsed % 3 == 0 and elapsed != last_log_sec:
-            last_log_sec = elapsed
-            status_text = verdict if verdict else "evaluating"
-            print(f"[act] Still evaluating submission... ({elapsed}s, state: {status_text})")
+        # 2. Check failure keywords
+        fail = _read_failure_on_screen(page)
+        if fail:
+            elapsed_ms = int((time.time() - start) * 1000)
+            print(f"[act] Failure keyword detected on screen ('{fail}') in {elapsed_ms}ms.")
+            return fail
+
+        # 3. Check if Next button is active and output is finished without errors
+        elapsed_sec = time.time() - start
+        if elapsed_sec > 1.5:
+            if _is_next_button_active(page) and not _is_evaluating_on_screen(page):
+                out = _get_output_text(page)
+                if out and len(out) > 0 and not fail:
+                    print(f"[act] Output completed and Next button is active! Accepting...")
+                    return "accepted"
 
         time.sleep(poll_interval)
 
-    # Final check: see if success keywords are present on screen before returning timeout
+    # Final check before timeout
     if is_accepted_on_screen(page):
-        print("[act] Verdict 'accepted' confirmed via on-screen success keywords")
+        return "accepted"
+
+    if _is_next_button_active(page) and not _read_failure_on_screen(page):
+        print("[act] Next button is active on screen with no errors. Accepting...")
         return "accepted"
 
     print("[act] Verdict timeout — no definite verdict reached within time limit")
@@ -546,122 +666,15 @@ def wait_for_verdict(page: Page, timeout: int = 15000) -> str:
 
 
 def _read_verdict(page: Page) -> str:
-    """
-    Ultra-fast single-pass verdict detector (<2ms execution).
-    Checks body text and non-stale judge containers for immediate verdicts.
-    """
-    try:
-        verdict = page.evaluate(r"""() => {
-            const body = document.body ? document.body.innerText : '';
-            const lowerBody = body.toLowerCase();
-
-            // 1. Completion / Celebration modals or buttons (highest confidence Accepted)
-            const hasKeepLearning = Array.from(document.querySelectorAll('button, a, [role="button"]')).some(b => {
-                const txt = (b.textContent || '').trim().toLowerCase();
-                return txt === 'keep learning' || txt === 'next module' || txt === 'start next module' || txt === 'continue learning';
-            });
-            if (hasKeepLearning) {
-                return 'accepted';
-            }
-
-            // 2. Positive verdict phrases (CodeChef Learn celebration and success messages)
-            const positivePhrases = [
-                "awesome, you nailed it",
-                "awesome",
-                "nailed it",
-                "you nailed it",
-                "hooray",
-                "well done, it's correct",
-                "well done, its correct",
-                "well done",
-                "it's correct",
-                "its correct",
-                "correct answer",
-                "all test cases passed",
-                "passed all test cases",
-                "100% score",
-                "great job",
-                "congratulations"
-            ];
-
-            const wrongPhrases = [
-                "wrong answer",
-                "failed on a hidden test case",
-                "test case failed"
-            ];
-
-            const cePhrases = [
-                "compilation error",
-                "compile error",
-                "fatal error:",
-                "sol.c:",
-                "compilation terminated"
-            ];
-
-            const rePhrases = [
-                "runtime error",
-                "sigsegv",
-                "nzec",
-                "segmentation fault"
-            ];
-
-            const tlePhrases = [
-                "time limit exceeded"
-            ];
-
-            // 3. Check for 'Find Error?' button (unique to Wrong Answer on CodeChef Learn)
-            const buttons = Array.from(document.querySelectorAll('button, a, [role="button"]'));
-            const hasFindError = buttons.some(b => (b.textContent || '').toLowerCase().includes('find error'));
-
-            // 4. Check if currently evaluating/running
-            const isEvaluating = (
-                lowerBody.includes('evaluating...') ||
-                lowerBody.includes('running...') ||
-                lowerBody.includes('compiling...') ||
-                lowerBody.includes('judging...') ||
-                lowerBody.includes('submitting...')
-            );
-            if (isEvaluating) {
-                return 'running';
-            }
-
-            // 5. Check positive phrases: if present and no explicit failure, it is accepted!
-            for (const p of positivePhrases) {
-                if (lowerBody.includes(p)) {
-                    const hasExplicitFail = (
-                        lowerBody.includes("failed on a hidden test case") ||
-                        lowerBody.includes("compilation error")
-                    );
-                    if (!hasExplicitFail) {
-                        return 'accepted';
-                    }
-                }
-            }
-
-            if (hasFindError) {
-                return 'wrong_answer';
-            }
-
-            for (const p of cePhrases) {
-                if (lowerBody.includes(p)) return 'compile_error';
-            }
-            for (const p of rePhrases) {
-                if (lowerBody.includes(p)) return 'runtime_error';
-            }
-            for (const p of tlePhrases) {
-                if (lowerBody.includes(p)) return 'time_limit';
-            }
-            for (const p of wrongPhrases) {
-                if (lowerBody.includes(p)) return 'wrong_answer';
-            }
-
-            return '';
-        }""")
-
-        return verdict or ""
-
-    except Exception:
-        return ""
+    """Compatibility wrapper around screen checks."""
+    if is_accepted_on_screen(page):
+        return "accepted"
+    fail = _read_failure_on_screen(page)
+    if fail:
+        return fail
+    if _is_evaluating_on_screen(page):
+        return "running"
+    return ""
 
 
 
