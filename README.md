@@ -12,10 +12,12 @@ Automated solver for CodeChef courses. Built with Playwright and LLMs to solve q
 
 ## Quick Start (Release)
 
-If you downloaded `Zenith-v1.0.0.zip` from Releases:
+If you downloaded `Zenith-v1.1.0.zip` from Releases:
+
+> **Prerequisite**: Python 3.10+ must be installed. When installing Python on Windows, make sure to check the box **"Add python.exe to PATH"** on the first installer screen.
 
 1. Extract the zip file.
-2. Double-click `run.bat`.
+2. Double-click `run.bat` (if Python is missing, it will offer to auto-install it via `winget`).
 3. On first launch, `.env` will open in Notepad. Paste your API key (Groq, OpenRouter, or Gemini) and save.
 4. Log into your CodeChef account in the browser window that opens.
 5. The runner detects your login and starts solving automatically.
